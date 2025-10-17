@@ -3,14 +3,14 @@ import { collection, addDoc, getDocs, query, orderBy } from 'firebase/firestore'
 import { db, auth } from './firebase';
 import { signOut } from 'firebase/auth';
 import './assets/main.css';
-import InvoiceForm from './components/InvoiceForm';
-import InvoiceList from './components/InvoiceList';
+
+
 import Dashboard from './components/Dashboard';
 import InventoryManagement from './components/inventory/InventoryManagement';
 import SalesInvoice from './components/SalesInvoice';
-import AdminPanel from './components/admin/AdminPanel';
+import AllInvoices from './components/AllInvoices';
 import StockImport from './components/StockImport';
-import ProductSearch from './components/ProductSearch';
+
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import AuthWrapper from './components/auth/AuthWrapper';
 import LoadingScreen from './components/LoadingScreen';
@@ -411,10 +411,10 @@ function MainApp() {
           <div className="animate-fadeIn">
             {activeTab === 'dashboard' && <Dashboard invoices={invoices} />}
             {activeTab === 'inventory' && <InventoryManagement />}
-            {activeTab === 'search' && <ProductSearch />}
+           
             {activeTab === 'create' && <InvoiceForm onSubmit={handleCreateInvoice} customers={customers} />}
-            {activeTab === 'invoices' && <InvoiceList invoices={invoices} />}
-            {activeTab === 'admin' && <AdminPanel />}
+            {activeTab === 'invoices' && <AllInvoices/>}
+          
           </div>
         </main>
 

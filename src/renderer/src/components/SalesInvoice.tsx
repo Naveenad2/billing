@@ -1,28 +1,33 @@
 // src/components/SalesInvoice.tsx
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { getAllProducts } from '../services/inventoryDB';
-import { saveInvoice } from '../services/salesDB';
-import { getStockByCodeBatch, decrementStockByCodeBatch } from '../services/inventoryDB';
+// A4 Invoice (sample photo style) • 7 rows per printed page • Single-copy print (printer handles copies)
+// Electron + SQLite (InventoryDB) • Smooth keyboard nav • Optional customer/phone/doctor
+// Live "saved amount" • Auto-invoice numbering from 1 • Merge same item rows • Refresh inventory after save
 
-// Normalized product type from inventoryDB
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { saveInvoice } from '../services/salesDB';
+
+/***** Type Definitions *****/
 type InvProduct = {
   id: string;
   itemCode: string;
   itemName: string;
   batch?: string;
-  expiryDate?: string;     // ISO or MM/YY
-  pack?: number;           // pack size
-  mrp?: number;            // MRP per unit/strip
-  sellingPrice?: number;   // selling rate per unit/strip
-  cgstRate?: number;       // %
-  sgstRate?: number;       // %
-  stockQuantity?: number;
+  expiryDate?: string;
+  pack: number;
+  mrp: number;
+  sellingPriceTab: number;
+  cgstRate: number;
+  sgstRate: number;
+  stockQuantity: number;
+  hsnCode?: string;
+  manufacturer?: string;
 };
 
 interface InvoiceItem {
   no: number;
   itemCode: string;
   itemName: string;
+  hsnCode?: string;
   batch: string;
   expiryDate: string;
   quantity: number;
@@ -49,11 +54,22 @@ type PickedRow = {
   quantity: number;
 };
 
-// ---------------- Product Search Modal ----------------
+/***** Inventory IPC (from preload) *****/
+declare global {
+  interface Window {
+    inventory?: {
+      getAll: () => Promise<InvProduct[]>;
+      decrementStockByCodeBatch: (
+        code: string,
+        batch: string,
+        qty: number
+      ) => Promise<{ success: boolean; newStock: number; itemName: string }>;
+    };
+  }
+}
 
-// ---------------- Product Search Modal (keyboard-first, zero-stock filtered) ----------------
-
-function normalizeExpiry(exp?: string) {
+/***** Helpers *****/
+const MMYY = (exp?: string) => {
   if (!exp) return '';
   if (/^\d{2}\/\d{2}$/.test(exp)) return exp;
   const d = new Date(exp);
@@ -61,112 +77,113 @@ function normalizeExpiry(exp?: string) {
   const mm = `${d.getMonth() + 1}`.padStart(2, '0');
   const yy = `${d.getFullYear()}`.slice(-2);
   return `${mm}/${yy}`;
-}
+};
 
+const keyFor = (code: string, batch: string) => `${code}||${batch}`;
+
+const nextInvoiceNo = (): string => {
+  // Stored numeric sequence starting from 1
+  const k = 'sales_invoice_seq_v1';
+  const n = Number(localStorage.getItem(k) || '0') + 1;
+  localStorage.setItem(k, String(n));
+  return String(n); // pure number like sample photo
+};
+
+/***** Product Search Modal *****/
 function ProductSearchModal({
   open,
   prefix,
   products,
+  pendingQty,
   onClose,
   onSelect
 }: {
   open: boolean;
   prefix: string;
   products: InvProduct[];
+  pendingQty: Record<string, number>;
   onClose: () => void;
   onSelect: (picked: PickedRow) => void;
 }) {
   const [query, setQuery] = useState(prefix || '');
   const [activeCode, setActiveCode] = useState<string | null>(null);
-
-  // keyboard state
-  const [focusPane, setFocusPane] = useState<'heads' | 'batches'>('heads'); // which grid has the highlight
+  const [focusPane, setFocusPane] = useState<'heads' | 'batches'>('heads');
   const [headIndex, setHeadIndex] = useState(0);
   const [batchIndex, setBatchIndex] = useState(0);
   const [qty, setQty] = useState<number>(1);
-
   const modalRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    setQuery(prefix || '');
-  }, [prefix]);
+  useEffect(() => setQuery(prefix || ''), [prefix]);
 
   useEffect(() => {
     if (open) {
-      setTimeout(() => modalRef.current?.focus(), 0);
+      setTimeout(() => {
+        modalRef.current?.focus();
+        inputRef.current?.focus(); // keep cursor in search box
+      }, 0);
     }
   }, [open]);
 
-  // Precompute which itemCodes have at least one batch with stock >= 1
   const codesWithStock = useMemo(() => {
     const set = new Set<string>();
     products.forEach(p => {
-      if (Number(p.stockQuantity || 0) >= 1) set.add(p.itemCode || '');
+      const k = keyFor(p.itemCode || '', p.batch || '');
+      const avail = Number(p.stockQuantity || 0) - Number(pendingQty[k] || 0);
+      if (avail >= 1) set.add(p.itemCode || '');
     });
     return set;
-  }, [products]);
+  }, [products, pendingQty]);
 
-  // Left list: distinct itemCode+itemName, filtered by query and only codes with stock
   const heads = useMemo(() => {
     const map = new Map<string, InvProduct>();
     const q = query.trim().toLowerCase();
     products.forEach(p => {
       const code = p.itemCode || '';
       const name = p.itemName || '';
-      if (!codesWithStock.has(code)) return;
+      const k = keyFor(code, p.batch || '');
+      const avail = Number(p.stockQuantity || 0) - Number(pendingQty[k] || 0);
+      if (avail < 1) return;
       const hay = `${code} ${name}`.toLowerCase();
       if (q && !hay.includes(q)) return;
-      const key = `${code}||${name}`;
-      if (!map.has(key)) map.set(key, p);
+      const headKey = `${code}||${name}`;
+      if (!map.has(headKey)) map.set(headKey, p);
     });
     const arr = Array.from(map.values()).sort((a, b) => (a.itemCode || '').localeCompare(b.itemCode || ''));
-    // clamp highlight if list shrinks
     if (headIndex >= arr.length) setHeadIndex(arr.length ? arr.length - 1 : 0);
-    // ensure activeCode is valid
-    if (!arr.length) {
-      if (activeCode) setActiveCode(null);
-    } else if (!activeCode || !arr.some(x => x.itemCode === activeCode)) {
-      // keep current highlight as active by default when moving into batches
-    }
+    if (!arr.length) setActiveCode(null);
     return arr;
-  }, [products, query, codesWithStock, headIndex, activeCode]);
+  }, [products, query, headIndex, pendingQty]);
 
-  // Right list: batches for selected code, only rows with stock >= 1
   const batchRows = useMemo(() => {
     if (!activeCode) return [];
     const rows = products
-      .filter(p => p.itemCode === activeCode && Number(p.stockQuantity || 0) >= 1)
-      .map(p => ({
-        ...p,
-        batch: p.batch || '-',
-        expiry: normalizeExpiry(p.expiryDate || ''),
-        mrpN: Number(p.mrp || 0),
-        rateN: Number(p.sellingPrice || 0),
-        cgstN: Number(p.cgstRate || 0),
-        sgstN: Number(p.sgstRate || 0),
-        packN: Number(p.pack || 1),
-        stockN: Number(p.stockQuantity || 0),
-      }))
+      .filter(p => p.itemCode === activeCode)
+      .map(p => {
+        const k = keyFor(p.itemCode || '', p.batch || '');
+        const avail = Math.max(0, Number(p.stockQuantity || 0) - Number(pendingQty[k] || 0));
+        return {
+          ...p,
+          batch: p.batch || '-',
+          expiry: MMYY(p.expiryDate || ''),
+          mrpN: Number(p.mrp || 0),
+          rateN: Number(p.sellingPriceTab || 0),
+          cgstN: Number(p.cgstRate || 0),
+          sgstN: Number(p.sgstRate || 0),
+          packN: Number(p.pack || 1),
+          stockN: avail,
+        };
+      })
+      .filter(r => r.stockN > 0)
       .sort((a, b) => (a.batch || '').localeCompare(b.batch || ''));
     if (batchIndex >= rows.length) setBatchIndex(rows.length ? rows.length - 1 : 0);
     return rows;
-  }, [products, activeCode, batchIndex]);
+  }, [products, activeCode, batchIndex, pendingQty]);
 
-  // Auto-select first head when list changes and we are on heads
-  useEffect(() => {
-    if (focusPane === 'heads' && heads.length) {
-      if (headIndex < 0) setHeadIndex(0);
-    }
-  }, [heads, focusPane, headIndex]);
-
-  // Keep the highlighted row visible
   useEffect(() => {
     if (!open) return;
-    if (focusPane === 'heads') {
-      document.getElementById(`head-row-${headIndex}`)?.scrollIntoView({ block: 'nearest' });
-    } else {
-      document.getElementById(`batch-row-${batchIndex}`)?.scrollIntoView({ block: 'nearest' });
-    }
+    const id = focusPane === 'heads' ? `head-row-${headIndex}` : `batch-row-${batchIndex}`;
+    document.getElementById(id)?.scrollIntoView({ block: 'nearest' });
   }, [open, focusPane, headIndex, batchIndex]);
 
   const commitHeadToBatches = () => {
@@ -189,50 +206,35 @@ function ProductSearchModal({
       cgstPercent: b.cgstN,
       sgstPercent: b.sgstN,
       pack: b.packN,
-      quantity: qty || 1
+      quantity: Math.min(qty || 1, b.stockN)
     });
   };
 
   const handleKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const k = e.key;
-    // prevent focus leaving the modal for fast-bill flow
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', 'Tab'].includes(k)) {
-      e.preventDefault();
-    }
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', 'Tab'].includes(k)) e.preventDefault();
     switch (k) {
-      case 'ArrowDown': { // move highlight down in the focused pane
+      case 'ArrowDown':
         if (focusPane === 'heads') setHeadIndex(i => Math.min(i + 1, Math.max(0, heads.length - 1)));
         else setBatchIndex(i => Math.min(i + 1, Math.max(0, batchRows.length - 1)));
         break;
-      }
-      case 'ArrowUp': {
+      case 'ArrowUp':
         if (focusPane === 'heads') setHeadIndex(i => Math.max(0, i - 1));
         else setBatchIndex(i => Math.max(0, i - 1));
         break;
-      }
-      case 'ArrowRight': {
-        if (focusPane === 'heads') {
-          if (!activeCode) commitHeadToBatches();
-          else setFocusPane('batches');
-        }
+      case 'ArrowRight':
+        if (focusPane === 'heads') { if (!activeCode) commitHeadToBatches(); else setFocusPane('batches'); }
         break;
-      }
-      case 'ArrowLeft': {
+      case 'ArrowLeft':
         setFocusPane('heads');
         break;
-      }
-      case 'Enter': { // select
-        if (focusPane === 'heads') {
-          commitHeadToBatches();
-        } else {
-          commitBatchSelection();
-        }
+      case 'Enter':
+        if (focusPane === 'heads') commitHeadToBatches();
+        else commitBatchSelection();
         break;
-      }
-      case 'Escape': {
+      case 'Escape':
         onClose();
         break;
-      }
     }
   };
 
@@ -244,36 +246,31 @@ function ProductSearchModal({
         ref={modalRef}
         tabIndex={0}
         onKeyDown={handleKey}
-        className="bg-white w-full max-w-5xl rounded-xl shadow-2xl overflow-hidden outline-none"
-        aria-label="Product search dialog with keyboard navigation"
+        className="bg-white w-full max-w-5xl rounded-lg shadow-2xl overflow-hidden outline-none"
       >
-        {/* Header */}
-        <div className="px-4 py-3 bg-slate-800 text-white flex items-center justify-between">
-          <h3 className="text-sm font-bold">Product Search (Inventory)</h3>
-          <div className="text-[10px] text-white/80">
-            Arrows to move • Enter to select • Esc to close
-          </div>
+        <div className="px-3 py-2 bg-indigo-600 text-white flex items-center justify-between">
+          <h3 className="text-sm font-bold">Product Search</h3>
+          <div className="text-[10px] text-white/80">Keep typing • Arrows • Enter • Esc</div>
         </div>
 
-        {/* Body */}
-        <div className="p-4 grid grid-cols-5 gap-4">
-          {/* Left: ItemCode / Name list */}
-          <div className={`col-span-2 border rounded-lg overflow-hidden ${focusPane === 'heads' ? 'ring-2 ring-blue-500' : ''}`}>
-            <div className="p-2 border-b bg-slate-50 flex items-center justify-between">
+        <div className="p-3 grid grid-cols-5 gap-3">
+          <div className={`col-span-2 border rounded overflow-hidden ${focusPane === 'heads' ? 'ring-2 ring-blue-500' : ''}`}>
+            <div className="p-2 border-b bg-slate-50">
               <input
+                ref={inputRef}
                 autoFocus
                 value={query}
                 onChange={e => { setQuery(e.target.value); setHeadIndex(0); }}
-                placeholder="Search by Item Code / Name"
-                className="w-full px-3 py-2 text-sm border rounded"
+                placeholder="Search Item Code / Name"
+                className="w-full px-2 py-1 text-xs border rounded"
               />
             </div>
-            <div className="max-h-[380px] overflow-auto">
-              <table className="w-full text-xs">
+            <div className="max-h-[350px] overflow-auto">
+              <table className="w-full text-[10px]">
                 <thead className="bg-slate-100 sticky top-0">
                   <tr>
-                    <th className="px-2 py-2 text-left">Item Code</th>
-                    <th className="px-2 py-2 text-left">Item Name</th>
+                    <th className="px-2 py-1 text-left">Code</th>
+                    <th className="px-2 py-1 text-left">Name</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -287,49 +284,44 @@ function ProductSearchModal({
                         onClick={() => { setHeadIndex(i); commitHeadToBatches(); }}
                         className={`cursor-pointer ${active ? 'bg-blue-100' : 'hover:bg-blue-50'}`}
                       >
-                        <td className="px-2 py-1.5 font-mono font-bold">{p.itemCode}</td>
-                        <td className="px-2 py-1.5">{p.itemName}</td>
+                        <td className="px-2 py-1 font-mono font-bold">{p.itemCode}</td>
+                        <td className="px-2 py-1">{p.itemName}</td>
                       </tr>
                     );
                   })}
-                  {heads.length === 0 && (
-                    <tr>
-                      <td className="px-2 py-3 text-center text-slate-500" colSpan={2}>No in-stock products</td>
-                    </tr>
-                  )}
+                  {heads.length === 0 && <tr><td className="px-2 py-2 text-center text-slate-500" colSpan={2}>No stock</td></tr>}
                 </tbody>
               </table>
             </div>
           </div>
 
-          {/* Right: Batches for chosen item code */}
-          <div className={`col-span-3 border rounded-lg overflow-hidden ${focusPane === 'batches' ? 'ring-2 ring-blue-500' : ''}`}>
-            <div className="px-3 py-2 bg-slate-50 border-b flex items-center justify-between">
-              <div className="text-sm font-semibold">Batches {activeCode ? `for ${activeCode}` : ''}</div>
+          <div className={`col-span-3 border rounded overflow-hidden ${focusPane === 'batches' ? 'ring-2 ring-blue-500' : ''}`}>
+            <div className="px-2 py-1 bg-slate-50 border-b flex items-center justify-between">
+              <div className="text-xs font-semibold">Batches {activeCode ? `for ${activeCode}` : ''}</div>
               <div className="flex items-center space-x-2">
-                <label className="text-xs font-semibold">Qty</label>
+                <label className="text-[10px] font-semibold">Qty</label>
                 <input
                   type="number"
                   min={1}
                   value={qty}
                   onChange={e => setQty(Math.max(1, Number(e.target.value || 1)))}
-                  className="w-20 px-2 py-1 text-sm border rounded"
+                  className="w-16 px-1 py-0.5 text-xs border rounded"
                 />
               </div>
             </div>
-            <div className="max-h-[380px] overflow-auto">
-              <table className="w-full text-xs">
+            <div className="max-h-[350px] overflow-auto">
+              <table className="w-full text-[10px]">
                 <thead className="bg-slate-100 sticky top-0">
                   <tr>
-                    <th className="px-2 py-2 text-left">Batch</th>
-                    <th className="px-2 py-2 text-center">Expiry</th>
-                    <th className="px-2 py-2 text-right">MRP</th>
-                    <th className="px-2 py-2 text-right">Rate</th>
-                    <th className="px-2 py-2 text-center">CGST%</th>
-                    <th className="px-2 py-2 text-center">SGST%</th>
-                    <th className="px-2 py-2 text-center">Pack</th>
-                    <th className="px-2 py-2 text-center">Stock</th>
-                    <th className="px-2 py-2 text-center">Select</th>
+                    <th className="px-2 py-1 text-left">Batch</th>
+                    <th className="px-2 py-1 text-center">Exp</th>
+                    <th className="px-2 py-1 text-right">MRP</th>
+                    <th className="px-2 py-1 text-right">Rate</th>
+                    <th className="px-2 py-1 text-center">CGST</th>
+                    <th className="px-2 py-1 text-center">SGST</th>
+                    <th className="px-2 py-1 text-center">Pack</th>
+                    <th className="px-2 py-1 text-center">Stock</th>
+                    <th className="px-2 py-1 text-center">Pick</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -341,27 +333,24 @@ function ProductSearchModal({
                         key={`${b.id}-${i}`}
                         onMouseEnter={() => setBatchIndex(i)}
                         onClick={() => { setBatchIndex(i); commitBatchSelection(); }}
-                        className={`${active ? 'bg-blue-100' : 'hover:bg-blue-50'}`}
+                        className={`cursor-pointer ${active ? 'bg-blue-100' : 'hover:bg-blue-50'}`}
                       >
-                        <td className="px-2 py-1.5 font-mono">{b.batch}</td>
-                        <td className="px-2 py-1.5 text-center text-purple-700 font-semibold">{b.expiry}</td>
-                        <td className="px-2 py-1.5 text-right">₹{b.mrpN.toFixed(2)}</td>
-                        <td className="px-2 py-1.5 text-right font-bold text-green-700">₹{b.rateN.toFixed(2)}</td>
-                        <td className="px-2 py-1.5 text-center">{b.cgstN}%</td>
-                        <td className="px-2 py-1.5 text-center">{b.sgstN}%</td>
-                        <td className="px-2 py-1.5 text-center">{b.packN}</td>
-                        <td className="px-2 py-1.5 text-center">{b.stockN}</td>
-                        {/* No button; Enter selects */}
-                        <td className="px-2 py-1.5 text-center text-[10px] text-slate-500">Enter</td>
+                        <td className="px-2 py-1 font-mono">{b.batch}</td>
+                        <td className="px-2 py-1 text-center text-purple-700">{b.expiry}</td>
+                        <td className="px-2 py-1 text-right">₹{b.mrpN.toFixed(2)}</td>
+                        <td className="px-2 py-1 text-right font-bold text-green-700">₹{b.rateN.toFixed(2)}</td>
+                        <td className="px-2 py-1 text-center">{b.cgstN}%</td>
+                        <td className="px-2 py-1 text-center">{b.sgstN}%</td>
+                        <td className="px-2 py-1 text-center">{b.packN}</td>
+                        <td className="px-2 py-1 text-center font-bold text-blue-700">{b.stockN}</td>
+                        <td className="px-2 py-1 text-center text-[10px] text-slate-500">Enter</td>
                       </tr>
                     );
                   })}
                   {(!activeCode || batchRows.length === 0) && (
-                    <tr>
-                      <td className="px-2 py-3 text-center text-slate-500" colSpan={9}>
-                        {activeCode ? 'No in-stock batches for this item' : 'Pick an Item Code to see batches'}
-                      </td>
-                    </tr>
+                    <tr><td className="px-2 py-2 text-center text-slate-500" colSpan={9}>
+                      {activeCode ? 'No batches' : 'Select item'}
+                    </td></tr>
                   )}
                 </tbody>
               </table>
@@ -369,93 +358,67 @@ function ProductSearchModal({
           </div>
         </div>
 
-        {/* Footer */}
-        <div className="px-4 py-2 bg-slate-50 border-t flex justify-between items-center">
-          <div className="text-[10px] text-slate-600">
-            Arrows move highlight • Left/Right switches lists • Enter selects • Esc closes
-          </div>
-          <button onClick={onClose} className="px-3 py-1.5 text-sm bg-gray-200 rounded hover:bg-gray-300">Close</button>
+        <div className="px-3 py-2 bg-slate-50 border-t flex justify-end">
+          <button onClick={onClose} className="px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300">Close</button>
         </div>
       </div>
     </div>
   );
 }
 
-
-// ---------------- Main Sales Invoice ----------------
-
+/***** Main Component *****/
 export default function SalesInvoice({ onClose }: { onClose: () => void }) {
- 
-  const [invoiceNo, setInvoiceNo] = useState('');
+  const [invoiceNo, setInvoiceNo] = useState(nextInvoiceNo());
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
   const [saleType, setSaleType] = useState('B2C');
-  const [patientName, setPatientName] = useState('');
+  const [customerName, setCustomerName] = useState('');
   const [contactNo, setContactNo] = useState('');
   const [doctorName, setDoctorName] = useState('');
   const [paymentMode, setPaymentMode] = useState('Cash');
-  
 
-  const [items, setItems] = useState<InvoiceItem[]>([{
-    no: 1, itemCode: '', itemName: '', batch: '', expiryDate: '', quantity: 0, pack: 1,
-    mrp: 0, rate: 0, grossAmt: 0, cgstPercent: 9, cgstAmt: 0, sgstPercent: 9, sgstAmt: 0, total: 0
-  }]);
+  const [items, setItems] = useState<InvoiceItem[]>([
+    { no: 1, itemCode: '', itemName: '', hsnCode: '', batch: '', expiryDate: '', quantity: 0, pack: 1,
+      mrp: 0, rate: 0, grossAmt: 0, cgstPercent: 2.5, cgstAmt: 0, sgstPercent: 2.5, sgstAmt: 0, total: 0 }
+  ]);
 
   const [inv, setInv] = useState<InvProduct[]>([]);
   const [openSearch, setOpenSearch] = useState(false);
   const [searchRow, setSearchRow] = useState<number | null>(null);
   const [searchPrefix, setSearchPrefix] = useState('');
-
-  const [showPreview, setShowPreview] = useState(false);
   const [savedToast, setSavedToast] = useState<{show:boolean; text:string}>({ show:false, text:'' });
-
-const showSaved = (text: string) => {
-  setSavedToast({ show:true, text });
-  setTimeout(() => setSavedToast({ show:false, text:'' }), 1400);
-};
-
   const [previewHTML, setPreviewHTML] = useState('');
+  const [showPreview, setShowPreview] = useState(false);
+
+  // For live “available” while picking
+  const pendingQty = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const r of items) {
+      if (!r.itemCode || !r.batch || !r.quantity) continue;
+      const k = keyFor(r.itemCode, r.batch);
+      map[k] = (map[k] || 0) + r.quantity;
+    }
+    return map;
+  }, [items]);
 
   const inputRefs = useRef<{ [k: string]: HTMLInputElement | null }>({});
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const products = await getAllProducts();
-        const normalized: InvProduct[] = (products || []).map((p: any) => ({
-          id: String(p.id ?? `${p.itemCode}-${p.batch ?? ''}`),
-          itemCode: String(p.itemCode ?? ''),
-          itemName: String(p.itemName ?? ''),
-          batch: p.batch ?? '',
-          expiryDate: p.expiryDate ?? p.expiry ?? '',
-          pack: Number(p.pack ?? 1),
-          mrp: Number(p.mrp ?? p.mrpStr ?? 0),
-          sellingPrice: Number(p.sellingPriceTab ?? p.sRateStrip ?? p.sellingPrice ?? 0),
-          cgstRate: Number(p.cgstRate ?? p.cgstPercent ?? 0),
-          sgstRate: Number(p.sgstRate ?? p.sgstPercent ?? 0),
-          stockQuantity: Number(p.stockQuantity ?? 0),
-        }));
-        setInv(normalized);
-      } catch (e) {
-        console.error('Failed to load inventory', e);
-      }
-    })();
-    setInvoiceNo(`SI${Date.now().toString().slice(-6)}`);
-  }, []);
-
-  const numberToWords = (num: number): string => {
-    const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
-    const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-    const teens = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
-    if (num === 0) return 'Zero';
-    if (num < 10) return ones[num];
-    if (num < 20) return teens[num - 10];
-    if (num < 100) return `${tens[Math.floor(num / 10)]} ${ones[num % 10]}`.trim();
-    if (num < 1000) return `${ones[Math.floor(num / 100)]} Hundred ${numberToWords(num % 100)}`.trim();
-    if (num < 100000) return `${numberToWords(Math.floor(num / 1000))} Thousand ${numberToWords(num % 1000)}`.trim();
-    if (num < 10000000) return `${numberToWords(Math.floor(num / 100000))} Lakh ${numberToWords(num % 100000)}`.trim();
-    return `${numberToWords(Math.floor(num / 10000000))} Crore ${numberToWords(num % 10000000)}`.trim();
+  const showSaved = (text: string) => {
+    setSavedToast({ show:true, text });
+    setTimeout(() => setSavedToast({ show:false, text:'' }), 3500);
   };
 
+  const loadInventory = async () => {
+    try {
+      if (!window.inventory) return;
+      const products = await window.inventory.getAll();
+      setInv(products || []);
+    } catch (e) {
+      console.error('Failed to load inventory', e);
+    }
+  };
+  useEffect(() => { loadInventory(); }, []);
+
+  /***** Row math *****/
   const calcRow = (r: InvoiceItem): InvoiceItem => {
     const gross = (r.quantity || 0) * (r.rate || 0);
     const cgstAmt = (gross * (r.cgstPercent || 0)) / 100;
@@ -478,7 +441,18 @@ const showSaved = (text: string) => {
     });
   };
 
-  // Open search when first letter entered in Item Code
+  const mergeIntoExistingRow = (picked: PickedRow): number | null => {
+    const code = picked.product.itemCode || '';
+    const batch = picked.batch || '';
+    const rate = picked.rate || 0;
+    const idx = items.findIndex(r => r.itemCode === code && r.batch === batch && r.rate === rate);
+    if (idx >= 0) {
+      setRow(idx, r => ({ ...r, quantity: (r.quantity || 0) + (picked.quantity || 1) }));
+      return idx;
+    }
+    return null;
+  };
+
   const handleItemCodeChange = (index: number, value: string) => {
     setRow(index, r => ({ ...r, itemCode: value }));
     if (value && value.length === 1) {
@@ -489,11 +463,21 @@ const showSaved = (text: string) => {
   };
 
   const applyPickedToRow = (idx: number, picked: PickedRow) => {
+    const mergedIdx = mergeIntoExistingRow(picked);
+    if (mergedIdx !== null) {
+      if (!items[idx].itemName && items.length > 1) {
+        setItems(prev => prev.filter((_, i) => i !== idx).map((r, i) => ({ ...r, no: i + 1 })));
+      }
+      setOpenSearch(false);
+      setTimeout(() => inputRefs.current[`${mergedIdx}-quantity`]?.focus(), 30);
+      return;
+    }
     const p = picked.product;
     setRow(idx, r => ({
       ...r,
       itemCode: p.itemCode || r.itemCode,
       itemName: p.itemName || r.itemName,
+      hsnCode: p.hsnCode || '',
       batch: picked.batch || '',
       expiryDate: picked.expiryDate || '',
       pack: picked.pack || 1,
@@ -503,7 +487,8 @@ const showSaved = (text: string) => {
       sgstPercent: picked.sgstPercent ?? 0,
       quantity: picked.quantity || 1,
     }));
-    setTimeout(() => inputRefs.current[`${idx}-quantity`]?.focus(), 50);
+    setOpenSearch(false);
+    setTimeout(() => inputRefs.current[`${idx}-quantity`] ?.focus(), 30);
   };
 
   const columns = ['itemCode','itemName','batch','expiryDate','quantity','pack','mrp','rate','cgstPercent','sgstPercent'] as const;
@@ -534,7 +519,7 @@ const showSaved = (text: string) => {
       e.preventDefault();
       if (rowIdx === items.length - 1) {
         addRow();
-        setTimeout(() => inputRefs.current[`${items.length}-${columns[0]}`]?.focus(), 30);
+        setTimeout(() => inputRefs.current[`${items.length}-${columns[0]}`]?.focus(), 20);
       } else {
         inputRefs.current[`${rowIdx + 1}-${columns[colIdx]}`]?.focus();
       }
@@ -543,9 +528,9 @@ const showSaved = (text: string) => {
 
   const addRow = () => {
     setItems(prev => [...prev, {
-      no: prev.length + 1, itemCode: '', itemName: '', batch: '', expiryDate: '',
+      no: prev.length + 1, itemCode: '', itemName: '', hsnCode: '', batch: '', expiryDate: '',
       quantity: 0, pack: 1, mrp: 0, rate: 0, grossAmt: 0,
-      cgstPercent: 9, cgstAmt: 0, sgstPercent: 9, sgstAmt: 0, total: 0
+      cgstPercent: 2.5, cgstAmt: 0, sgstPercent: 2.5, sgstAmt: 0, total: 0
     }]);
   };
 
@@ -556,12 +541,27 @@ const showSaved = (text: string) => {
     });
   };
 
+  const clearAll = () => {
+    if (!confirm('Clear all fields?')) return;
+    setCustomerName('');
+    setContactNo('');
+    setDoctorName('');
+    setItems([{
+      no: 1, itemCode: '', itemName: '', hsnCode: '', batch: '', expiryDate: '',
+      quantity: 0, pack: 1, mrp: 0, rate: 0, grossAmt: 0,
+      cgstPercent: 2.5, cgstAmt: 0, sgstPercent: 2.5, sgstAmt: 0, total: 0
+    }]);
+    setInvoiceNo(nextInvoiceNo());
+  };
+
+  /***** Totals *****/
   const totals = useMemo(() => {
     const totalQty = items.reduce((s, r) => s + (r.quantity || 0), 0);
     const grossTotal = items.reduce((s, r) => s + (r.grossAmt || 0), 0);
     const totalCgst = items.reduce((s, r) => s + (r.cgstAmt || 0), 0);
     const totalSgst = items.reduce((s, r) => s + (r.sgstAmt || 0), 0);
     const billAmount = items.reduce((s, r) => s + (r.total || 0), 0);
+    const savedFromMrp = items.reduce((s, r) => s + Math.max(0, (r.mrp - r.rate)) * (r.quantity || 0), 0);
     return {
       totalQty,
       grossTotal: Number(grossTotal.toFixed(2)),
@@ -571,771 +571,522 @@ const showSaved = (text: string) => {
       billAmount: Number(billAmount.toFixed(2)),
       roundOff: Number((Math.round(billAmount) - billAmount).toFixed(2)),
       finalAmount: Math.round(billAmount),
+      savedFromMrp: Number(savedFromMrp.toFixed(2))
     };
   }, [items]);
 
-  const saveToLocalDB = async (invoiceData: any) =>
-    new Promise((resolve, reject) => {
-      const req = indexedDB.open('SalesInvoiceDB', 1);
-      req.onerror = () => reject(req.error);
-      req.onupgradeneeded = (ev) => {
-        const db = (ev.target as IDBOpenDBRequest).result;
-        if (!db.objectStoreNames.contains('invoices')) {
-          db.createObjectStore('invoices', { keyPath: 'id', autoIncrement: true });
-        }
-      };
-      req.onsuccess = () => {
-        const db = req.result;
-        const tx = db.transaction(['invoices'], 'readwrite');
-        const st = tx.objectStore('invoices');
-        const add = st.add(invoiceData);
-        add.onsuccess = () => resolve(add.result);
-        add.onerror = () => reject(add.error);
-      };
-    });
-// Replace your generateInvoiceHTML with this version to fix the template error
-// REPLACE ONLY THIS FUNCTION
-// REPLACE ONLY THIS FUNCTION
-// REPLACE ONLY THIS FUNCTION
-const generateInvoiceHTML = (invoiceData: any) => {
-  const t = invoiceData.totals;
-  const fmt = (n: number) => (Number(n || 0)).toFixed(2);
+  const gstSummary = useMemo(() => {
+    const map = new Map<number, { taxable: number; taxAmt: number }>();
+    for (const r of items) {
+      const gst = Number((r.cgstPercent || 0) + (r.sgstPercent || 0));
+      const row = map.get(gst) || { taxable: 0, taxAmt: 0 };
+      row.taxable += (r.grossAmt || 0);
+      row.taxAmt += (r.cgstAmt || 0) + (r.sgstAmt || 0);
+      map.set(gst, row);
+    }
+    const rates = [5, 12, 18, 28];
+    return rates.map(rate => ({
+      rate,
+      taxable: Number((map.get(rate)?.taxable || 0).toFixed(2)),
+      taxAmt: Number((map.get(rate)?.taxAmt || 0).toFixed(2)),
+    }));
+  }, [items]);
 
-  // Saved amount
-  const savedAmount = (invoiceData.items || []).reduce(
-    (sum: number, it: any) =>
-      sum + (Number(it.quantity || 0) * Math.max(0, Number(it.mrp || 0) - Number(it.rate || 0))),
-    0
-  );
+  /***** Printing (A4, 7 rows/page, single copy) *****/
+  const PAGE_ROWS = 7;
 
-  // GST slab summary (5/12/18/28)
-  type Slab = { base: number; cgst: number; sgst: number };
-  const slabs: Record<string, Slab> = { '5': { base: 0, cgst: 0, sgst: 0 }, '12': { base: 0, cgst: 0, sgst: 0 }, '18': { base: 0, cgst: 0, sgst: 0 }, '28': { base: 0, cgst: 0, sgst: 0 } };
-  (invoiceData.items || []).forEach((r: any) => {
-    const rate = Number(r.cgstPercent || 0) + Number(r.sgstPercent || 0);
-    const key = rate === 5 || rate === 12 || rate === 18 || rate === 28 ? String(rate) : null;
-    if (!key) return;
-    slabs[key].base += Number(r.grossAmt || 0);
-    slabs[key].cgst += Number(r.cgstAmt || 0);
-    slabs[key].sgst += Number(r.sgstAmt || 0);
-  });
+  const splitPages = (rows: InvoiceItem[], pageSize = PAGE_ROWS) => {
+    const pages: InvoiceItem[][] = [];
+    for (let i = 0; i < rows.length; i += pageSize) pages.push(rows.slice(i, i + pageSize));
+    return pages.length ? pages : [[]];
+  };
 
-  // Pagination: exactly 9 rows per page
-  const rowsPerPage = 9;
-  const rows = (invoiceData.items || []).map((r: any, i: number) => ({ ...r, no: i + 1 }));
-  const pages: any[][] = [];
-  for (let i = 0; i < rows.length; i += rowsPerPage) pages.push(rows.slice(i, i + rowsPerPage));
-  if (pages.length === 0) pages.push([]);
+  const buildPrintHTML = (pages: InvoiceItem[][]) => {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    const stateCode = '32';
 
-  const styles = `
-  <style>
-    @page { size: A4 landscape; margin: 8mm; } /* A4 landscape */ 
-    * { box-sizing: border-box; }
-    body { margin: 0; color: #000; font-family: Arial, sans-serif; }
-
-    /* Outer frame with page breaks */
-    .page { border: 3px solid #000; padding: 8mm; border-radius: 2px; }
-    .page:not(:last-child) { break-after: page; page-break-after: always; } /* modern + legacy */
-
-    /* Header (no inner boxes) */
-    .hdr { display: grid; grid-template-rows: auto auto; row-gap: 6mm; }
-    .brand { text-align: center; }
-    .title { font-size: 22px; font-weight: 800; letter-spacing: .5px; }
-    .addr { font-size: 11px; margin-top: 2px; }
-    .caption { font-size: 12px; font-weight: 700; margin-top: 3px; }
-
-    .info-grid { display: grid; grid-template-columns: 1.1fr 1fr; column-gap: 8mm; }
-    .kv-grid { display: grid; grid-template-columns: 110px 1fr; row-gap: 4px; column-gap: 10px; font-size: 11px; }
-    .lab { font-weight: 700; }
-
-    /* Table and alignment */
-    .table-wrap { border: 2px solid #000; }
-    table { width: 100%; border-collapse: collapse; table-layout: fixed; } /* fixed keeps column widths stable */
-    th { border: 2px solid #000; background: #f2f2f2; font-size: 11px; padding: 6px 4px; text-align: center; }
-    td { border: 1px solid #000; font-size: 11px; padding: 4px 4px; text-align: center; }
-    td.left { text-align: left; padding-left: 6px; }
-    td.right { text-align: right; padding-right: 6px; }
-
-    /* Column widths tuned for neat alignment */
-    col.no        { width: 4%; }
-    col.name      { width: 26%; }
-    col.hsn       { width: 9%; }
-    col.qty       { width: 5.5%; }
-    col.batch     { width: 9%; }
-    col.expiry    { width: 7.5%; }
-    col.rate      { width: 7.5%; }
-    col.mrp       { width: 7.5%; }
-    col.taxable   { width: 8.5%; }
-    col.cgstp     { width: 5%; }
-    col.cgsta     { width: 6.5%; }
-    col.sgstp     { width: 5%; }
-    col.sgsta     { width: 6.5%; }
-    col.total     { width: 10%; }
-
-    /* Exactly 9 visible rows: pad with blanks to lock height */
-    .pad-row td { height: 21px; }
-
-    /* Footer blocks */
-    .footer-grid { display: grid; grid-template-columns: 1.2fr 1fr; column-gap: 8mm; margin-top: 6mm; }
-    .gst-box { border: 2px solid #000; padding: 3mm; }
-    .gst-grid { display: grid; grid-template-columns: 1fr 28mm 28mm; gap: 3px; font-size: 11px; }
-    .gst-head { font-weight: 700; border-bottom: 1px solid #000; padding-bottom: 2px; margin-bottom: 2px; }
-
-    .grand { border: 2px solid #000; padding: 3mm; }
-    .g-row { display: flex; justify-content: space-between; font-size: 11px; margin: 2px 0; }
-    .bill-line { border-top: 2px solid #000; margin-top: 6px; padding-top: 6px; font-weight: 800; font-size: 14px; }
-    .sign { text-align: right; margin-top: 10mm; font-size: 11px; }
-  </style>`;
-
-  const renderHeader = () => `
-    <div class="hdr">
-      <div class="brand">
-        <div class="title">PENCOS MEDICALS</div>
-        <div class="addr">MELEPANDIYIL BUILDING, CHENGANNUR • Ph : 0479 2454670</div>
-        <div class="caption">INVOICE</div>
-      </div>
-      <div class="info-grid">
-        <!-- Left: Customer info (no inner boxes) -->
-        <div class="kv-grid">
-          <div class="lab">Customer :</div><div>${invoiceData.patientName || ''}</div>
-          <div class="lab">PH :</div><div>${invoiceData.contactNo || ''}</div>
-          <div class="lab">Doctor :</div><div>${invoiceData.doctorName || ''}</div>
-        </div>
-        <!-- Right: Invoice info (no inner boxes) -->
-        <div class="kv-grid">
-          <div class="lab">Invoice No :</div><div>${invoiceData.invoiceNo}</div>
-          <div class="lab">Invoice Date :</div><div>${new Date(invoiceData.invoiceDate).toLocaleDateString('en-IN')}</div>
-          <div class="lab">Time :</div><div>${new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})}</div>
-          <div class="lab">State Code :</div><div>32</div>
-          <div class="lab">Pay Mode :</div><div>${invoiceData.paymentMode}</div>
-          <div class="lab">GSTIN :</div><div>32AABAT4432F1ZX</div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  const renderTable = (pageRows: any[]) => {
-    const pad = Math.max(0, rowsPerPage - pageRows.length);
-    return `
-      <div class="table-wrap" style="margin-top:6mm">
-        <table>
-          <colgroup>
-            <col class="no"/><col class="name"/><col class="hsn"/><col class="qty"/>
-            <col class="batch"/><col class="expiry"/><col class="rate"/><col class="mrp"/>
-            <col class="taxable"/><col class="cgstp"/><col class="cgsta"/><col class="sgstp"/>
-            <col class="sgsta"/><col class="total"/>
-          </colgroup>
-          <thead>
-            <tr>
-              <th>No</th>
-              <th style="text-align:left">Name of Product / Service</th>
-              <th>HSN Code</th>
-              <th>Qty</th>
-              <th>Batch</th>
-              <th>Expiry</th>
-              <th>Rate</th>
-              <th>MRP</th>
-              <th>Taxable Value</th>
-              <th>CGST %</th>
-              <th>CGST Amt</th>
-              <th>SGST %</th>
-              <th>SGST Amt</th>
-              <th>Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${pageRows.map((r: any) => `
-              <tr>
-                <td>${r.no}</td>
-                <td class="left"><strong>${r.itemName || ''}</strong></td>
-                <td>${r.hsnCode || ''}</td>
-                <td>${Number(r.quantity || 0)}</td>
-                <td>${r.batch || ''}</td>
-                <td>${r.expiryDate || ''}</td>
-                <td class="right">${fmt(r.rate || 0)}</td>
-                <td class="right">${fmt(r.mrp || 0)}</td>
-                <td class="right">${fmt(r.grossAmt || 0)}</td>
-                <td>${fmt(r.cgstPercent || 0)}</td>
-                <td class="right">${fmt(r.cgstAmt || 0)}</td>
-                <td>${fmt(r.sgstPercent || 0)}</td>
-                <td class="right">${fmt(r.sgstAmt || 0)}</td>
-                <td class="right"><strong>${fmt(r.total || 0)}</strong></td>
-              </tr>
-            `).join('')}
-            ${Array.from({ length: pad }).map(() => `
-              <tr class="pad-row">
-                <td></td><td class="left"></td><td></td><td></td><td></td><td></td>
-                <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
+    const tableHead = `
+      <tr>
+        <th style="width:28px;">No</th>
+        <th style="width:240px;">Name of Product / Service</th>
+        <th style="width:70px;">HSN Code</th>
+        <th style="width:40px;">Qty</th>
+        <th style="width:80px;">Batch</th>
+        <th style="width:60px;">Expiry</th>
+        <th style="width:55px;">Rate</th>
+        <th style="width:55px;">MRP</th>
+        <th style="width:75px;">Taxable Value</th>
+        <th style="width:40px;">CGST%</th>
+        <th style="width:60px;">CGST Amt</th>
+        <th style="width:40px;">SGST%</th>
+        <th style="width:60px;">SGST Amt</th>
+        <th style="width:70px;">Total</th>
+      </tr>
     `;
-  };
 
-  const renderBottom = () => `
-    <div class="footer-grid">
-      <div class="gst-box">
-        <div class="gst-grid">
-          <div class="gst-head">GST %</div>
-          <div class="gst-head" style="text-align:right;">TAXABLE</div>
-          <div class="gst-head" style="text-align:right;">GST AMT</div>
+    const css = `
+      @page { size: A4; margin: 8mm 10mm; }
+      body { font-family: Arial, sans-serif; color:#000; }
+      .page { width:100%; }
+      .header { border:1px solid #000; padding:8px; }
+      .brand { text-align:center; font-weight:bold; font-size:18px; }
+      .sub { text-align:center; font-size:10px; margin-top:2px; }
+      .meta { display:flex; justify-content:space-between; font-size:10px; margin-top:6px; }
+      .meta .left p, .meta .right p{ margin:2px 0; }
+      .bar { font-size:10px; margin-top:6px; display:flex; justify-content:space-between; }
+      .billline { border:1px solid #000; border-top:none; }
+      table { width:100%; border-collapse:collapse; font-size:10px; }
+      th, td { border:1px solid #000; padding:4px 3px; }
+      th { text-align:center; }
+      td.right { text-align:right; }
+      td.center { text-align:center; }
+      .gstbox { width:100%; border:1px solid #000; border-top:none; padding:6px; }
+      .row { display:flex; justify-content:space-between; }
+      .small { font-size:9px; }
+      .saved { font-weight:bold; }
+      .signature { text-align:right; margin-top:10px; font-size:10px; }
+      .pb { page-break-after: always; }
+    `;
 
-          <div>GST 5%  ON Rs.</div>
-          <div style="text-align:right">${fmt(slabs['5'].base)}</div>
-          <div style="text-align:right">${fmt(slabs['5'].cgst + slabs['5'].sgst)}</div>
+    const gstTable = `
+      <table class="small" style="width:60%; margin-top:6px;">
+        <thead>
+          <tr>
+            <th style="width:70px;">GST %</th>
+            <th>Taxable</th>
+            <th>GST AMT</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${gstSummary.map(g => `
+            <tr>
+              <td>${g.rate}%</td>
+              <td class="right">${g.taxable.toFixed(2)}</td>
+              <td class="right">${g.taxAmt.toFixed(2)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
 
-          <div>GST 12% ON Rs.</div>
-          <div style="text-align:right">${fmt(slabs['12'].base)}</div>
-          <div style="text-align:right">${fmt(slabs['12'].cgst + slabs['12'].sgst)}</div>
+    const pagesHTML = pages.map((rows, pi) => {
+      const blanks = Array(Math.max(0, PAGE_ROWS - rows.length)).fill(null);
+      const tableRows = rows.map(r => `
+        <tr>
+          <td class="center">${r.no}</td>
+          <td>${r.itemName || ''}</td>
+          <td class="center">${r.hsnCode || ''}</td>
+          <td class="center">${r.quantity || 0}</td>
+          <td class="center" style="font-family:monospace">${r.batch || '-'}</td>
+          <td class="center" style="color:#6B21A8;font-weight:bold">${r.expiryDate || ''}</td>
+          <td class="right">${r.rate.toFixed(2)}</td>
+          <td class="right">${r.mrp.toFixed(2)}</td>
+          <td class="right">${r.grossAmt.toFixed(2)}</td>
+          <td class="center">${(r.cgstPercent || 0).toFixed(1)}</td>
+          <td class="right">${r.cgstAmt.toFixed(2)}</td>
+          <td class="center">${(r.sgstPercent || 0).toFixed(1)}</td>
+          <td class="right">${r.sgstAmt.toFixed(2)}</td>
+          <td class="right" style="font-weight:bold">${r.total.toFixed(2)}</td>
+        </tr>
+      `).join('') + blanks.map(() => `
+        <tr>
+          <td>&nbsp;</td><td></td><td></td><td></td><td></td><td></td>
+          <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+        </tr>
+      `).join('');
 
-          <div>GST 18% ON Rs.</div>
-          <div style="text-align:right">${fmt(slabs['18'].base)}</div>
-          <div style="text-align:right">${fmt(slabs['18'].cgst + slabs['18'].sgst)}</div>
+      const lastPage = pi === pages.length - 1;
 
-          <div>GST 28% ON Rs.</div>
-          <div style="text-align:right">${fmt(slabs['28'].base)}</div>
-          <div style="text-align:right">${fmt(slabs['28'].cgst + slabs['28'].sgst)}</div>
-        </div>
-      </div>
-
-      <div class="grand">
-        <div class="g-row"><span>Taxable</span><span>₹${fmt(t.grossTotal)}</span></div>
-        <div class="g-row"><span>CGST Amt</span><span>₹${fmt(t.totalCgst)}</span></div>
-        <div class="g-row"><span>SGST Amt</span><span>₹${fmt(t.totalSgst)}</span></div>
-        <div class="g-row"><span>Round Off</span><span>₹${fmt(t.roundOff)}</span></div>
-        <div class="g-row" style="font-weight:700">You Have saved : <span>₹${fmt(savedAmount)}</span></div>
-        <div class="g-row bill-line"><span>Bill Amount :</span><span>₹${fmt(t.finalAmount)}</span></div>
-        <div class="sign">Authorised Signature</div>
-      </div>
-    </div>
-  `;
-
-  const renderPage = (pageRows: any[]) => `
-    <div class="page">
-      ${renderHeader()}
-      ${renderTable(pageRows)}
-      ${renderBottom()}
-    </div>
-  `;
-
-  return `
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>${invoiceData.invoiceNo}</title>
-${styles}
-</head>
-<body>
-  ${pages.map(renderPage).join('')}
-</body>
-</html>`;
-};
-
-
-
-  const handlePreview = () => {
-    if (!patientName || items.every(i => !i.itemName)) {
-      alert('Please enter customer and at least one item');
-      return;
-    }
-    const data = {
-      invoiceNo, invoiceDate, saleType, patientName, contactNo, doctorName, paymentMode,
-      items: items.filter(i => i.itemName),
-      totals,
-      createdAt: new Date().toISOString()
-    };
-    setPreviewHTML(generateInvoiceHTML(data));
-    setShowPreview(true);
-  };
-
-  const handlePrint = () => {
-    const iframe = document.getElementById('print-iframe') as HTMLIFrameElement;
-    iframe?.contentWindow?.print();
-  };
-
-// Replace ONLY this function inside SalesInvoice component
-const handleSave = async () => {
-  if (!patientName || items.every(i => !i.itemName)) {
-    alert('Please enter customer and at least one item');
-    return;
-  }
-
-  const pickedItems = items.filter(i => i.itemName);
-
-  // 1) Save bill to Sales DB (get sequential invoice number)
-  let saved: { id: number; invoiceNo: string };
-  try {
-    saved = await saveInvoice({
-      header: {
-        invoiceDate,
-        timeISO: new Date().toISOString(),
-        saleType,
-        patientName,
-        contactNo,
-        doctorName,
-        paymentMode,
-      },
-      items: pickedItems,
-      totals,
-      createdAt: new Date().toISOString(),
-    } as any);
-  } catch (e) {
-    alert('Failed to save invoice');
-    console.error('Save error:', e);
-    return;
-  }
-
-  // 2) Decrement stock for each line and collect messages
-  const stockMessages: string[] = [];
-  let allSuccess = true;
-  
-  for (const r of pickedItems) {
-    try {
-      const result = await decrementStockByCodeBatch(
-        r.itemCode, 
-        r.batch, 
-        Number(r.quantity || 0)
-      );
-      
-      if (result.success) {
-        stockMessages.push(
-          `✓ ${r.quantity} qty reduced from ${result.itemName} (Batch: ${r.batch}) • Stock now: ${result.newStock}`
-        );
-      } else {
-        stockMessages.push(
-          `⚠ Could not find ${r.itemCode} / ${r.batch} in inventory`
-        );
-        allSuccess = false;
-      }
-    } catch (e) {
-      stockMessages.push(
-        `⚠ Error updating ${r.itemCode} / ${r.batch}`
-      );
-      allSuccess = false;
-      console.error('Stock update error:', e);
-    }
-  }
-
-  // 3) Show success toast with stock details
-  const mainMessage = `✓ Invoice #${saved.invoiceNo} saved successfully`;
-  const fullMessage = [mainMessage, ...stockMessages].join('\n');
-  
-  showSaved(fullMessage);
-
-  // 4) Clear the invoice table for next customer
-  setItems([{
-    no: 1, itemCode: '', itemName: '', batch: '', expiryDate: '',
-    quantity: 0, pack: 1, mrp: 0, rate: 0, grossAmt: 0,
-    cgstPercent: 9, cgstAmt: 0, sgstPercent: 9, sgstAmt: 0, total: 0
-  }]);
-  setInvoiceNo(`SI${Date.now().toString().slice(-6)}`);
-
-  // 5) Print with the assigned DB invoice number
-  const dataForPrint = {
-    invoiceNo: saved.invoiceNo,
-    invoiceDate, saleType, patientName, contactNo, doctorName, paymentMode,
-    items: pickedItems,
-    totals,
-    createdAt: new Date().toISOString()
-  };
-  setPreviewHTML(generateInvoiceHTML(dataForPrint));
-  setShowPreview(true);
-  setTimeout(() => {
-    const iframe = document.getElementById('print-iframe') as HTMLIFrameElement;
-    iframe?.contentWindow?.print();
-  }, 400);
-};
-
-
-  return (
-    <>
-      {/* Screen */}
-      <div className="fixed inset-0 bg-slate-900/95 z-50 overflow-hidden">
-        <div className="h-screen flex flex-col">
-          {/* Header */}
-          <div className="bg-gradient-to-r from-primary to-indigo-600 text-white px-4 py-2 flex justify-between items-center shadow-lg">
-            <div className="flex items-center space-x-3">
-              <div className="p-1.5 bg-white/10 rounded-lg">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
+      return `
+        <div class="page ${pi < pages.length - 1 ? 'pb' : ''}">
+          <div class="header">
+            <div class="brand">PENCOS MEDICALS</div>
+            <div class="sub">MELEPANDIYIL BUILDING, CHENGANNUR • Ph: 0479 2454670</div>
+            <div class="meta">
+              <div class="left">
+                <p>DL No : 6-193/20/2005</p>
+                <p>DL No : 6-194/21/2005</p>
               </div>
-              <div>
-                <h1 className="text-base font-bold">Sales Invoice</h1>
-                <p className="text-[9px] text-white/70">Type first letter in Item Code to open search • F3 to search</p>
+              <div class="right" style="text-align:right">
+                <p>GSTIN : 32AABAT4432F1ZX</p>
               </div>
             </div>
-            <button onClick={onClose} className="p-1.5 hover:bg-white/10 rounded-lg transition-all">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-
-          {/* Top form */}
-          <div className="bg-white px-4 py-2 border-b grid grid-cols-7 gap-2">
-            <div>
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Invoice No</label>
-              <input type="text" value={invoiceNo} onChange={e => setInvoiceNo(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
+            <div class="bar">
+              <div>Customer : ${customerName || ''}</div>
+              <div>Invoice No. : ${invoiceNo}</div>
+              <div>Invoice Date : ${new Date(invoiceDate).toLocaleDateString('en-IN')}</div>
             </div>
-            <div>
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Date</label>
-              <input type="date" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
-            </div>
-            <div>
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Sale Type</label>
-              <select value={saleType} onChange={e => setSaleType(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded">
-                <option value="B2C">B2C</option>
-                <option value="B2B">B2B</option>
-              </select>
-            </div>
-            <div className="col-span-2">
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Customer</label>
-              <input type="text" value={patientName} onChange={e => setPatientName(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" placeholder="Customer name" />
-            </div>
-            <div>
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Contact</label>
-              <input type="text" value={contactNo} onChange={e => setContactNo(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
-            </div>
-            <div>
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Doctor</label>
-              <input type="text" value={doctorName} onChange={e => setDoctorName(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
+            <div class="bar">
+              <div>PH : ${contactNo || ''}</div>
+              <div>Time : ${timeStr}</div>
+              <div>State Code : ${stateCode}</div>
+              <div>Pay Mode : ${paymentMode}</div>
             </div>
           </div>
 
-          {/* Table */}
-          <div className="flex-1 overflow-auto bg-white">
-            <table className="w-full border-collapse text-[10px]">
-              <thead className="sticky top-0 z-10">
-                <tr className="bg-gradient-to-r from-slate-700 to-slate-600 text-white">
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-10">No</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-28">Item Code</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold text-left min-w-[220px]">Item Name</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-24">Batch</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-20">Expiry</th>
-                  <th className="border border-blue-500 px-2 py-1.5 font-bold w-16 bg-blue-600">Qty</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-16">Pack</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold text-right w-24">MRP</th>
-                  <th className="border border-blue-500 px-2 py-1.5 font-bold text-right w-24 bg-blue-600">Rate</th>
-                  <th className="border border-green-500 px-2 py-1.5 font-bold text-right w-28 bg-green-600">Gross</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-16">CGST%</th>
-                  <th className="border border-green-500 px-2 py-1.5 font-bold text-right w-24 bg-green-600">CGST</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-16">SGST%</th>
-                  <th className="border border-green-500 px-2 py-1.5 font-bold text-right w-24 bg-green-600">SGST</th>
-                  <th className="border border-indigo-500 px-2 py-1.5 font-bold text-right w-28 bg-indigo-600">Total</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-10">Del</th>
+          <div class="billline">
+            <table>
+              <thead>${tableHead}</thead>
+              <tbody>${tableRows}</tbody>
+              ${lastPage ? `
+              <tfoot>
+                <tr>
+                  <td colspan="8" class="right" style="font-weight:bold">TOTAL</td>
+                  <td class="right" style="font-weight:bold">${totals.grossTotal.toFixed(2)}</td>
+                  <td></td>
+                  <td class="right" style="font-weight:bold">${totals.totalCgst.toFixed(2)}</td>
+                  <td></td>
+                  <td class="right" style="font-weight:bold">${totals.totalSgst.toFixed(2)}</td>
+                  <td class="right" style="font-weight:bold">${(totals.finalAmount - totals.roundOff).toFixed(2)}</td>
                 </tr>
-              </thead>
-              <tbody>
-                {items.map((r, index) => (
-                  <tr key={index} className={`${index % 2 === 0 ? 'bg-white' : 'bg-slate-50'} hover:bg-blue-50`}>
-                    <td className="border border-slate-300 px-2 py-0.5 text-center font-bold">{r.no}</td>
-
-                    {/* Item Code (opens modal on first char) */}
-                    <td className="border border-slate-300 p-0">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-itemCode`] = el)}
-                        type="text"
-                        value={r.itemCode}
-                        onChange={e => handleItemCodeChange(index, e.target.value)}
-                        onKeyDown={e => handleKeyDown(e, index, 0)}
-                        className="w-full px-2 py-0.5 text-[10px] border-0 focus:ring-2 focus:ring-blue-400 bg-transparent font-mono font-semibold"
-                        placeholder="Code"
-                      />
-                    </td>
-
-                    {/* Item Name */}
-                    <td className="border border-slate-300 p-0">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-itemName`] = el)}
-                        type="text"
-                        value={r.itemName}
-                        onChange={e => setRow(index, row => ({ ...row, itemName: e.target.value }))}
-                        onKeyDown={e => handleKeyDown(e, index, 1)}
-                        className="w-full px-2 py-0.5 text-[10px] border-0 focus:ring-2 focus:ring-blue-400 bg-transparent font-semibold"
-                        placeholder="Item name"
-                      />
-                    </td>
-
-                    {/* Batch */}
-                    <td className="border border-slate-300 p-0">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-batch`] = el)}
-                        type="text"
-                        value={r.batch}
-                        onChange={e => setRow(index, row => ({ ...row, batch: e.target.value }))}
-                        onKeyDown={e => handleKeyDown(e, index, 2)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center border-0 focus:ring-2 focus:ring-blue-400 bg-transparent font-mono"
-                      />
-                    </td>
-
-                    {/* Expiry */}
-                    <td className="border border-slate-300 p-0">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-expiryDate`] = el)}
-                        type="text"
-                        value={r.expiryDate}
-                        onChange={e => setRow(index, row => ({ ...row, expiryDate: e.target.value }))}
-                        onKeyDown={e => handleKeyDown(e, index, 3)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center border-0 focus:ring-2 focus:ring-blue-400 bg-transparent"
-                        placeholder="MM/YY"
-                      />
-                    </td>
-
-                    {/* Qty */}
-                    <td className="border border-blue-300 p-0 bg-blue-50">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-quantity`] = el)}
-                        type="number"
-                        value={r.quantity || ''}
-                        onChange={e => setRow(index, row => ({ ...row, quantity: Number(e.target.value || 0) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 4)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center font-bold text-blue-700 border-0 focus:ring-2 focus:ring-blue-500 bg-transparent"
-                      />
-                    </td>
-
-                    {/* Pack */}
-                    <td className="border border-slate-300 p-0">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-pack`] = el)}
-                        type="number"
-                        value={r.pack || ''}
-                        onChange={e => setRow(index, row => ({ ...row, pack: Number(e.target.value || 1) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 5)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center border-0 focus:ring-2 focus:ring-blue-400 bg-transparent"
-                      />
-                    </td>
-
-                    {/* MRP */}
-                    <td className="border border-slate-300 p-0">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-mrp`] = el)}
-                        type="number"
-                        step="0.01"
-                        value={r.mrp || ''}
-                        onChange={e => setRow(index, row => ({ ...row, mrp: Number(e.target.value || 0) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 6)}
-                        className="w-full px-1 py-0.5 text-[10px] text-right border-0 focus:ring-2 focus:ring-blue-400 bg-transparent"
-                      />
-                    </td>
-
-                    {/* Rate */}
-                    <td className="border border-blue-300 p-0 bg-blue-50">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-rate`] = el)}
-                        type="number"
-                        step="0.01"
-                        value={r.rate || ''}
-                        onChange={e => setRow(index, row => ({ ...row, rate: Number(e.target.value || 0) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 7)}
-                        className="w-full px-1 py-0.5 text-[10px] text-right font-bold text-blue-700 border-0 focus:ring-2 focus:ring-blue-500 bg-transparent"
-                      />
-                    </td>
-
-                    {/* Gross */}
-                    <td className="border border-green-300 px-2 py-0.5 text-right text-[10px] font-bold bg-green-50 text-green-800">
-                      {r.grossAmt.toFixed(2)}
-                    </td>
-
-                    {/* CGST% */}
-                    <td className="border border-slate-300 p-0">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-cgstPercent`] = el)}
-                        type="number"
-                        step="0.1"
-                        value={r.cgstPercent || ''}
-                        onChange={e => setRow(index, row => ({ ...row, cgstPercent: Number(e.target.value || 0) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 8)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center border-0 focus:ring-2 focus:ring-blue-400 bg-transparent"
-                      />
-                    </td>
-
-                    {/* CGST Amt */}
-                    <td className="border border-green-300 px-2 py-0.5 text-right text-[10px] font-semibold bg-green-50 text-green-800">
-                      {r.cgstAmt.toFixed(2)}
-                    </td>
-
-                    {/* SGST% */}
-                    <td className="border border-slate-300 p-0">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-sgstPercent`] = el)}
-                        type="number"
-                        step="0.1"
-                        value={r.sgstPercent || ''}
-                        onChange={e => setRow(index, row => ({ ...row, sgstPercent: Number(e.target.value || 0) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 9)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center border-0 focus:ring-2 focus:ring-blue-400 bg-transparent"
-                      />
-                    </td>
-
-                    {/* SGST Amt */}
-                    <td className="border border-green-300 px-2 py-0.5 text-right text-[10px] font-semibold bg-green-50 text-green-800">
-                      {r.sgstAmt.toFixed(2)}
-                    </td>
-
-                                       {/* Total */}
-                                       <td className="border border-indigo-300 px-2 py-0.5 text-right text-[11px] font-bold bg-indigo-50 text-indigo-900">
-                      ₹{r.total.toFixed(2)}
-                    </td>
-
-                    {/* Delete */}
-                    <td className="border border-slate-300 p-0 text-center">
-                      <button
-                        onClick={() => removeRow(index)}
-                        className="p-1 text-red-600 hover:bg-red-100 rounded transition-all"
-                        title="Delete row"
-                      >
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
-                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
+              </tfoot>
+              ` : ''}
             </table>
           </div>
 
-          {/* Add Row */}
-          <div className="bg-white px-4 py-2 border-t">
-            <button
-              onClick={addRow}
-              className="px-4 py-1.5 bg-gradient-to-r from-slate-600 to-slate-500 text-white text-xs rounded-lg hover:shadow-lg transition-all flex items-center space-x-2 font-semibold"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-              </svg>
-              <span>Add Row (Enter)</span>
-            </button>
+          ${lastPage ? `
+          <div class="gstbox">
+            ${gstTable}
+            <div class="row" style="margin-top:6px;">
+              <div class="small">Amount in words as per need</div>
+              <div class="small">
+                <div>Sub Total : <strong>₹${(totals.billAmount).toFixed(2)}</strong></div>
+                <div>Round Off : ${totals.roundOff >= 0 ? '' : '-'}<strong>₹${Math.abs(totals.roundOff).toFixed(2)}</strong></div>
+                <div class="saved">You Have saved : <strong>₹${totals.savedFromMrp.toFixed(2)}</strong></div>
+                <div style="font-size:14px; font-weight:bold; margin-top:4px;">Bill Amount : <span>₹${totals.finalAmount.toFixed(2)}</span></div>
+              </div>
+            </div>
+            <div class="signature">Authorised Signature</div>
           </div>
+          ` : ''}
+        </div>
+      `;
+    }).join('');
 
-          {/* Totals Bar */}
-          <div className="bg-gradient-to-r from-slate-100 to-white px-4 py-2 border-t-2 grid grid-cols-6 gap-2">
-            <div className="bg-white rounded-lg p-2 border border-slate-200 shadow-sm">
-              <p className="text-[9px] text-gray-600 font-bold mb-0.5">Total Qty</p>
-              <p className="text-base font-bold text-blue-700">{totals.totalQty}</p>
-            </div>
-            <div className="bg-white rounded-lg p-2 border border-slate-200 shadow-sm">
-              <p className="text-[9px] text-gray-600 font-bold mb-0.5">Gross Total</p>
-              <p className="text-base font-bold text-green-700">₹{totals.grossTotal.toFixed(2)}</p>
-            </div>
-            <div className="bg-white rounded-lg p-2 border border-slate-200 shadow-sm">
-              <p className="text-[9px] text-gray-600 font-bold mb-0.5">CGST</p>
-              <p className="text-base font-bold text-orange-700">₹{totals.totalCgst.toFixed(2)}</p>
-            </div>
-            <div className="bg-white rounded-lg p-2 border border-slate-200 shadow-sm">
-              <p className="text-[9px] text-gray-600 font-bold mb-0.5">SGST</p>
-              <p className="text-base font-bold text-orange-700">₹{totals.totalSgst.toFixed(2)}</p>
-            </div>
-            <div className="bg-white rounded-lg p-2 border border-slate-200 shadow-sm">
-              <p className="text-[9px] text-gray-600 font-bold mb-0.5">Round Off</p>
-              <p className="text-base font-bold text-purple-700">₹{totals.roundOff.toFixed(2)}</p>
-            </div>
-            <div className="bg-gradient-to-br from-indigo-600 to-indigo-700 rounded-lg p-2 shadow-lg flex flex-col items-center justify-center text-white">
-              <p className="text-[9px] font-bold uppercase mb-0.5">Bill Amount</p>
-              <p className="text-xl font-bold">₹{totals.finalAmount}</p>
-            </div>
+    return `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="UTF-8" />
+          <title>Invoice ${invoiceNo}</title>
+          <style>${css}</style>
+        </head>
+        <body>${pagesHTML}</body>
+      </html>
+    `;
+  };
+
+  /***** Save & Print *****/
+  const handleSave = async () => {
+    const pickedItems = items.filter(i => i.itemName && i.quantity > 0);
+    if (pickedItems.length === 0) {
+      alert('Add at least one item');
+      return;
+    }
+
+    let saved: { id: number; invoiceNo: string } | null = null;
+    try {
+      saved = await saveInvoice({
+        header: {
+          invoiceNo, invoiceDate, timeISO: new Date().toISOString(),
+          saleType, patientName: customerName, contactNo, doctorName, paymentMode
+        },
+        items: pickedItems,
+        totals,
+        createdAt: new Date().toISOString(),
+      } as any);
+    } catch (e) {
+      console.error('Save error:', e);
+      alert('Failed to save invoice');
+      return;
+    }
+
+    // Decrement stock and refresh inventory
+    const stockMessages: string[] = [];
+    try {
+      if (window.inventory?.decrementStockByCodeBatch) {
+        for (const r of pickedItems) {
+          const resp = await window.inventory.decrementStockByCodeBatch(
+            r.itemCode, r.batch, Number(r.quantity || 0)
+          );
+          if (resp.success) {
+            stockMessages.push(`✓ ${r.quantity} reduced from ${resp.itemName} [${r.batch}] → ${resp.newStock}`);
+          } else {
+            stockMessages.push(`⚠ Not found: ${r.itemCode}/${r.batch}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Stock decrement failed', e);
+    }
+    await loadInventory();
+
+    // Build single-copy paginated print (7 rows/page)
+    const pages = splitPages(pickedItems.map((r, i) => ({ ...r, no: i + 1 })), PAGE_ROWS);
+    const html = buildPrintHTML(pages);
+
+    setPreviewHTML(html);
+    setShowPreview(true);
+    setTimeout(() => {
+      const iframe = document.getElementById('print-iframe') as HTMLIFrameElement;
+      iframe?.contentWindow?.print();
+    }, 500);
+
+    showSaved(['✅ Saved Invoice #' + (saved?.invoiceNo || invoiceNo), ...stockMessages].join('\n'));
+
+    // Reset for next bill
+    setItems([{
+      no: 1, itemCode: '', itemName: '', hsnCode: '', batch: '', expiryDate: '',
+      quantity: 0, pack: 1, mrp: 0, rate: 0, grossAmt: 0,
+      cgstPercent: 2.5, cgstAmt: 0, sgstPercent: 2.5, sgstAmt: 0, total: 0
+    }]);
+    setInvoiceNo(nextInvoiceNo());
+  };
+
+  /***** UI *****/
+  return (
+    <>
+      <div className="fixed inset-0 bg-white z-50 overflow-hidden flex flex-col">
+        {/* Header */}
+        <div className="bg-gradient-to-r from-indigo-600 to-purple-700 text-white px-4 py-2 flex items-center justify-between shadow">
+          <div className="flex items-center space-x-4">
+            <h2 className="text-lg font-bold">Sales Invoice</h2>
+            <p className="text-[10px] text-white/80">F3: Search • Arrows/Tab: Navigate • Enter: Add Row</p>
           </div>
+          <button onClick={onClose} className="px-3 py-1 bg-white/20 rounded text-xs hover:bg-white/30">✕ Close</button>
+        </div>
 
-          {/* Actions */}
-          <div className="bg-white px-4 py-2 border-t flex justify-between items-center">
-            <div className="flex items-center space-x-2">
-              <label className="text-[10px] font-bold text-gray-600">Payment:</label>
-              <select
-                value={paymentMode}
-                onChange={e => setPaymentMode(e.target.value)}
-                className="px-2 py-1 text-xs border-2 border-gray-300 rounded font-semibold"
-              >
-                <option value="Cash">Cash</option>
-                <option value="UPI">UPI</option>
-                <option value="Card">Card</option>
-                <option value="Credit">Credit</option>
+        {/* Compact Form */}
+        <div className="px-4 py-2 bg-slate-50 border-b">
+          <div className="grid grid-cols-8 gap-2 text-[11px]">
+            <div>
+              <label className="block text-[10px] font-bold mb-0.5">Invoice No</label>
+              <input value={invoiceNo} readOnly className="w-full px-2 py-1 border rounded text-[10px] bg-gray-100 font-mono" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold mb-0.5">Date</label>
+              <input type="date" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} className="w-full px-2 py-1 border rounded text-[10px]" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold mb-0.5">Sale Type</label>
+              <select value={saleType} onChange={e => setSaleType(e.target.value)} className="w-full px-2 py-1 border rounded text-[10px]">
+                <option>B2C</option><option>B2B</option>
               </select>
             </div>
-
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={handlePreview}
-                className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs rounded-lg font-bold"
-              >
-                Preview
-              </button>
-              <button
-                onClick={handleSave}
-                className="px-4 py-1.5 bg-primary hover:bg-primary/90 text-white text-xs rounded-lg font-bold shadow"
-              >
-                Save & Print
-              </button>
-              <button
-                onClick={onClose}
-                className="px-3 py-1.5 bg-gray-200 hover:bg-gray-300 text-gray-800 text-xs rounded-lg font-bold"
-              >
-                Close
-              </button>
+            <div className="col-span-2">
+              <label className="block text-[10px] font-bold mb-0.5">Customer</label>
+              <input value={customerName} onChange={e => setCustomerName(e.target.value)} className="w-full px-2 py-1 border rounded text-[10px]" placeholder="Optional" />
             </div>
+            <div>
+              <label className="block text-[10px] font-bold mb-0.5">Contact</label>
+              <input value={contactNo} onChange={e => setContactNo(e.target.value)} className="w-full px-2 py-1 border rounded text-[10px]" placeholder="Optional" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold mb-0.5">Doctor</label>
+              <input value={doctorName} onChange={e => setDoctorName(e.target.value)} className="w-full px-2 py-1 border rounded text-[10px]" placeholder="Optional" />
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold mb-0.5">Payment</label>
+              <select value={paymentMode} onChange={e => setPaymentMode(e.target.value)} className="w-full px-2 py-1 border rounded text-[10px]">
+                <option>Cash</option><option>Card</option><option>UPI</option><option>Credit</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        {/* Items table (unlimited rows in UI) */}
+        <div className="flex-1 overflow-auto">
+          <table className="w-full text-[10px] border-collapse">
+            <thead className="bg-slate-700 text-white sticky top-0">
+              <tr>
+                <th className="px-1 py-1.5 border text-center" style={{width:'30px'}}>#</th>
+                <th className="px-1 py-1.5 border text-left" style={{width:'90px'}}>Item Code</th>
+                <th className="px-1 py-1.5 border text-left">Item Name</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'80px'}}>Batch</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'60px'}}>Expiry</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'50px'}}>Qty</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'45px'}}>Pack</th>
+                <th className="px-1 py-1.5 border text-right" style={{width:'65px'}}>MRP</th>
+                <th className="px-1 py-1.5 border text-right" style={{width:'65px'}}>Rate</th>
+                <th className="px-1 py-1.5 border text-right" style={{width:'75px'}}>Gross</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'50px'}}>CGST%</th>
+                <th className="px-1 py-1.5 border text-right" style={{width:'65px'}}>CGST</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'50px'}}>SGST%</th>
+                <th className="px-1 py-1.5 border text-right" style={{width:'65px'}}>SGST</th>
+                <th className="px-1 py-1.5 border text-right" style={{width:'80px'}}>Total</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'40px'}}>Del</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item, idx) => (
+                <tr key={idx} className="border-b hover:bg-blue-50">
+                  <td className="px-1 py-0.5 border text-center text-[9px] font-bold">{item.no}</td>
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-itemCode`] = el}
+                      value={item.itemCode}
+                      onChange={e => handleItemCodeChange(idx, e.target.value)}
+                      onKeyDown={e => handleKeyDown(e, idx, 0)}
+                      className="w-full px-1 py-0.5 text-[10px] font-mono border-0 outline-none focus:bg-yellow-50"
+                      placeholder="Code (F3 search)"
+                    />
+                  </td>
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-itemName`] = el}
+                      value={item.itemName}
+                      onChange={e => setRow(idx, r => ({ ...r, itemName: e.target.value }))}
+                      onKeyDown={e => handleKeyDown(e, idx, 1)}
+                      className="w-full px-1 py-0.5 text-[10px] border-0 outline-none focus:bg-yellow-50"
+                    />
+                  </td>
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-batch`] = el}
+                      value={item.batch}
+                      onChange={e => setRow(idx, r => ({ ...r, batch: e.target.value }))}
+                      onKeyDown={e => handleKeyDown(e, idx, 2)}
+                      className="w-full px-1 py-0.5 text-[10px] font-mono text-center border-0 outline-none focus:bg-yellow-50"
+                    />
+                  </td>
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-expiryDate`] = el}
+                      value={item.expiryDate}
+                      onChange={e => setRow(idx, r => ({ ...r, expiryDate: e.target.value }))}
+                      onKeyDown={e => handleKeyDown(e, idx, 3)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                      placeholder="MM/YY"
+                    />
+                  </td>
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-quantity`] = el}
+                      type="number"
+                      value={item.quantity || ''}
+                      onChange={e => setRow(idx, r => ({ ...r, quantity: Number(e.target.value || 0) }))}
+                      onKeyDown={e => handleKeyDown(e, idx, 4)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center font-bold border-0 outline-none focus:bg-yellow-50"
+                    />
+                  </td>
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-pack`] = el}
+                      type="number"
+                      value={item.pack}
+                      onChange={e => setRow(idx, r => ({ ...r, pack: Number(e.target.value || 1) }))}
+                      onKeyDown={e => handleKeyDown(e, idx, 5)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                    />
+                  </td>
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-mrp`] = el}
+                      type="number" step="0.01"
+                      value={item.mrp || ''}
+                      onChange={e => setRow(idx, r => ({ ...r, mrp: Number(e.target.value || 0) }))}
+                      onKeyDown={e => handleKeyDown(e, idx, 6)}
+                      className="w-full px-1 py-0.5 text-[10px] text-right border-0 outline-none focus:bg-yellow-50"
+                    />
+                  </td>
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-rate`] = el}
+                      type="number" step="0.01"
+                      value={item.rate || ''}
+                      onChange={e => setRow(idx, r => ({ ...r, rate: Number(e.target.value || 0) }))}
+                      onKeyDown={e => handleKeyDown(e, idx, 7)}
+                      className="w-full px-1 py-0.5 text-[10px] text-right font-bold text-green-700 border-0 outline-none focus:bg-yellow-50"
+                    />
+                  </td>
+                  <td className="px-1 py-0.5 border text-right">₹{item.grossAmt.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-cgstPercent`] = el}
+                      type="number" step="0.1"
+                      value={item.cgstPercent}
+                      onChange={e => setRow(idx, r => ({ ...r, cgstPercent: Number(e.target.value || 0) }))}
+                      onKeyDown={e => handleKeyDown(e, idx, 8)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                    />
+                  </td>
+                  <td className="px-1 py-0.5 border text-right text-blue-700">₹{item.cgstAmt.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-sgstPercent`] = el}
+                      type="number" step="0.1"
+                      value={item.sgstPercent}
+                      onChange={e => setRow(idx, r => ({ ...r, sgstPercent: Number(e.target.value || 0) }))}
+                      onKeyDown={e => handleKeyDown(e, idx, 9)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                    />
+                  </td>
+                  <td className="px-1 py-0.5 border text-right text-blue-700">₹{item.sgstAmt.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border text-right font-bold text-purple-700">₹{item.total.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border text-center">
+                    <button onClick={() => removeRow(idx)} className="text-red-600 hover:bg-red-100 px-1 rounded text-xs">🗑</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Bottom bar */}
+        <div className="bg-white border-t px-4 py-2 flex items-center justify-between">
+          <button onClick={addRow} className="px-3 py-1.5 bg-slate-600 text-white rounded text-[11px] font-semibold hover:bg-slate-700">+ Add Row (Enter)</button>
+
+          <div className="flex items-center space-x-4 text-[11px]">
+            <div><span className="text-slate-600">Total Qty:</span> <span className="font-bold text-sm">{totals.totalQty}</span></div>
+            <div><span className="text-slate-600">CGST:</span> <span className="font-semibold text-blue-700">₹{totals.totalCgst.toFixed(2)}</span></div>
+            <div><span className="text-slate-600">SGST:</span> <span className="font-semibold text-blue-700">₹{totals.totalSgst.toFixed(2)}</span></div>
+            <div><span className="text-slate-600">Saved:</span> <span className="font-semibold text-emerald-700">₹{totals.savedFromMrp.toFixed(2)}</span></div>
+            <div><span className="text-slate-600">Round:</span> <span className="font-semibold">{totals.roundOff >= 0 ? '+' : ''}₹{totals.roundOff.toFixed(2)}</span></div>
+            <div className="bg-indigo-50 px-3 py-1.5 rounded">
+              <span className="text-slate-600 font-bold mr-2">BILL AMOUNT</span>
+              <span className="font-bold text-indigo-700 text-lg">₹{totals.finalAmount.toFixed(2)}</span>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <button onClick={clearAll} className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded text-[11px] font-semibold hover:bg-gray-300">Clear</button>
+            <button onClick={handleSave} className="px-4 py-1.5 bg-green-600 text-white rounded text-[11px] font-semibold hover:bg-green-700">Save & Print</button>
           </div>
         </div>
       </div>
 
-      {/* Preview / Print Modal */}
-      {showPreview && (
-        <div className="fixed inset-0 bg-black/70 z-[70] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl h-[85vh] overflow-hidden flex flex-col">
-            <div className="px-4 py-2 bg-gradient-to-r from-slate-800 to-slate-700 text-white flex justify-between items-center">
-              <h3 className="font-bold">Invoice Preview</h3>
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={handlePrint}
-                  className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-xs rounded-lg font-bold"
-                >
-                  Print
-                </button>
-                <button
-                  onClick={() => setShowPreview(false)}
-                  className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white text-xs rounded-lg font-bold"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-            <div className="flex-1 overflow-hidden">
-              <iframe
-                id="print-iframe"
-                title="Invoice Preview"
-                className="w-full h-full bg-white"
-                srcDoc={previewHTML}
-              />
-            </div>
-          </div>
+      {/* Product Search */}
+      {openSearch && searchRow !== null && (
+        <ProductSearchModal
+          open={openSearch}
+          prefix={searchPrefix}
+          products={inv}
+          pendingQty={pendingQty}
+          onClose={() => setOpenSearch(false)}
+          onSelect={(picked) => { applyPickedToRow(searchRow, picked); setSearchRow(null); }}
+        />
+      )}
+
+      {/* Toast */}
+      {savedToast.show && (
+        <div className="fixed top-4 right-4 z-[100] bg-green-600 text-white px-4 py-3 rounded-lg shadow-2xl max-w-md">
+          <pre className="text-[10px] font-mono whitespace-pre-wrap">{savedToast.text}</pre>
         </div>
       )}
 
-{/* Product Search Modal */}
-<ProductSearchModal
-        open={openSearch}
-        prefix={searchPrefix}
-        products={inv}
-        onClose={() => setOpenSearch(false)}
-        onSelect={(picked) => {
-          if (searchRow !== null) applyPickedToRow(searchRow, picked);
-          setOpenSearch(false);
-        }}
-      />
-
-      {/* Success Toast */}
-      {savedToast.show && (
-  <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[120] max-w-2xl">
-    <div className="px-4 py-3 rounded-lg shadow-2xl bg-emerald-600 text-white text-xs font-semibold whitespace-pre-line">
-      {savedToast.text}
-    </div>
-  </div>
-)}
-
+      {/* Print preview */}
+      {showPreview && (
+        <div className="fixed inset-0 z-[90] bg-black/80 flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-4xl h-[90vh] rounded-lg overflow-hidden shadow-2xl">
+            <div className="bg-slate-800 text-white px-4 py-2 flex justify-between items-center">
+              <h3 className="font-bold text-sm">Print Preview</h3>
+              <button onClick={() => setShowPreview(false)} className="px-3 py-1 bg-red-500 rounded text-xs hover:bg-red-600">Close</button>
+            </div>
+            <iframe id="print-iframe" srcDoc={previewHTML} className="w-full h-full border-0" />
+          </div>
+        </div>
+      )}
     </>
   );
 }

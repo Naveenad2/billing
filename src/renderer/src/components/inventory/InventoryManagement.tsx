@@ -1,17 +1,65 @@
 // src/components/inventory/InventoryManagement.tsx
+// Uses InventoryDB (SQLite) via window.inventory IPC API
+// 100% Accurate: Stock Value = SUM(Qty × SRate), Expired checked with TODAY, Low Stock = Qty ≤ ROL
+
 import { useState, useEffect } from 'react';
-import { 
-  getAllProducts, 
-  Product, 
-  getInventoryStats, 
-  InventoryStats,
-  getLowStockProducts,
-  getOutOfStockProducts,
-  getExpiredProducts,
-  getExpiringProducts
-} from '../../services/inventoryDB';
 import StockImport from '../StockImport';
-import ProductSearch from '../ProductSearch';
+
+/***** Type Definitions *****/
+interface Product {
+  id: string;
+  itemCode: string;
+  itemName: string;
+  regionalName?: string;
+  hsnCode: string;
+  batch?: string;
+  category: string;
+  manufacturer?: string;
+  rol: number;
+  altUnit?: string;
+  pack: string;
+  purchasePrice: number;
+  sellingPriceTab: number;
+  mrp: number;
+  stockQuantity: number;
+  minStockLevel: number;
+  maxStockLevel: number;
+  cgstRate: number;
+  sgstRate: number;
+  igstRate: number;
+  prTaxIncluded: boolean;
+  slTaxIncluded: boolean;
+  hasExpiryDate: boolean;
+  expiryDate?: string;
+  productCode?: string;
+  productName?: string;
+  shortKey?: string;
+  brand?: string;
+  unit?: string;
+  sellingPrice?: number;
+  supplier?: string;
+  barcode?: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface InventoryStats {
+  totalProducts: number;
+  totalItems: number;
+  totalQuantity: number;
+  totalStockValue: number; // SUM(qty × sellingPriceTab)
+  totalCostValue: number;
+  totalMRPValue: number;
+  lowStockItems: number;
+  lowStockCount: number;
+  outOfStockItems: number;
+  outOfStockCount: number;
+  expiredCount: number;
+  expiringCount: number;
+  categoriesCount: number;
+  invalidPricingCount: number;
+}
 
 interface DailyClosing {
   date: string;
@@ -21,6 +69,23 @@ interface DailyClosing {
   totalProducts: number;
   lowStockCount: number;
   outOfStockCount: number;
+  expiredCount: number;
+}
+
+// Declare window.inventory API (from preload.ts → InventoryDB)
+declare global {
+  interface Window {
+    inventory?: {
+      getAll: () => Promise<Product[]>;
+      stats: () => Promise<InventoryStats>;
+      getLowStock: () => Promise<Product[]>;
+      getOutOfStock: () => Promise<Product[]>;
+      getExpiring: (days: number) => Promise<Product[]>;
+      getExpired: () => Promise<Product[]>;
+      search: (query: string) => Promise<Product[]>;
+      getCategories: () => Promise<string[]>;
+    };
+  }
 }
 
 export default function InventoryManagement() {
@@ -28,8 +93,8 @@ export default function InventoryManagement() {
   const [filteredProducts, setFilteredProducts] = useState<Product[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showStockImport, setShowStockImport] = useState(false);
-  const [showProductSearch, setShowProductSearch] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   
   // Filters
@@ -43,7 +108,7 @@ export default function InventoryManagement() {
   const [closingDateFrom, setClosingDateFrom] = useState('');
   const [closingDateTo, setClosingDateTo] = useState('');
   
-  // Stats
+  // 🔥 CLIENT-SIDE CALCULATED STATS (100% accurate from ALL products)
   const [inventoryStats, setInventoryStats] = useState<InventoryStats>({
     totalProducts: 0,
     totalItems: 0,
@@ -57,7 +122,8 @@ export default function InventoryManagement() {
     outOfStockCount: 0,
     expiredCount: 0,
     expiringCount: 0,
-    categoriesCount: 0
+    categoriesCount: 0,
+    invalidPricingCount: 0
   });
 
   const [dailyClosings, setDailyClosings] = useState<DailyClosing[]>([]);
@@ -67,6 +133,13 @@ export default function InventoryManagement() {
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
+
+  // 🔥 Categorized product sets for accurate filtering
+  const [lowStockProducts, setLowStockProducts] = useState<Set<string>>(new Set());
+  const [outOfStockProducts, setOutOfStockProducts] = useState<Set<string>>(new Set());
+  const [expiredProducts, setExpiredProducts] = useState<Set<string>>(new Set());
+  const [expiringProducts, setExpiringProducts] = useState<Set<string>>(new Set());
+  const [invalidPricingProducts, setInvalidPricingProducts] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchData();
@@ -81,7 +154,6 @@ export default function InventoryManagement() {
     
     const midnightTimeout = setTimeout(() => {
       autoSaveDailyClosing();
-      // Set up daily interval after first midnight
       const dailyInterval = setInterval(autoSaveDailyClosing, 24 * 60 * 60 * 1000);
       return () => clearInterval(dailyInterval);
     }, timeUntilMidnight);
@@ -97,53 +169,190 @@ export default function InventoryManagement() {
     filterClosings();
   }, [dailyClosings, closingDateFrom, closingDateTo]);
 
+  // 🔥 CRITICAL: Calculate 100% accurate stats from ALL products
+  const calculateAccurateStats = (allProducts: Product[]): InventoryStats => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const thirtyDaysFromNow = new Date(today);
+    thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
+
+    let totalQuantity = 0;
+    let totalStockValue = 0;
+    let totalCostValue = 0;
+    let totalMRPValue = 0;
+    let lowStockCount = 0;
+    let outOfStockCount = 0;
+    let expiredCount = 0;
+    let expiringCount = 0;
+    let invalidPricingCount = 0;
+
+    const lowStockSet = new Set<string>();
+    const outOfStockSet = new Set<string>();
+    const expiredSet = new Set<string>();
+    const expiringSet = new Set<string>();
+    const invalidPricingSet = new Set<string>();
+    const categories = new Set<string>();
+
+    allProducts.forEach(product => {
+      const qty = Number(product.stockQuantity) || 0;
+      const srate = Number(product.sellingPriceTab) || 0;
+      const prate = Number(product.purchasePrice) || 0;
+      const mrp = Number(product.mrp) || 0;
+      const rol = Number(product.rol) || 0;
+
+      // Total quantity
+      totalQuantity += qty;
+
+      // 🔥 CRITICAL: Stock value = ONLY Quantity × SRate
+      totalStockValue += qty * srate;
+      totalCostValue += qty * prate;
+      totalMRPValue += qty * mrp;
+
+      // Categories
+      if (product.category) {
+        categories.add(product.category);
+      }
+
+      // 🔥 Low Stock: qty > 0 AND qty <= ROL
+      if (qty > 0 && qty <= rol) {
+        lowStockCount++;
+        lowStockSet.add(product.id);
+      }
+
+      // 🔥 Out of Stock: qty = 0
+      if (qty === 0) {
+        outOfStockCount++;
+        outOfStockSet.add(product.id);
+      }
+
+      // 🔥 Expired: hasExpiryDate AND expiryDate < TODAY
+      if (product.hasExpiryDate && product.expiryDate) {
+        const expiryDate = new Date(product.expiryDate);
+        expiryDate.setHours(0, 0, 0, 0);
+        
+        if (expiryDate < today) {
+          expiredCount++;
+          expiredSet.add(product.id);
+        } else if (expiryDate >= today && expiryDate <= thirtyDaysFromNow) {
+          // Expiring within 30 days (but not expired yet)
+          expiringCount++;
+          expiringSet.add(product.id);
+        }
+      }
+
+      // 🔥 Invalid Pricing: SRate > MRP (pricing error)
+      if (srate > mrp && mrp > 0) {
+        invalidPricingCount++;
+        invalidPricingSet.add(product.id);
+      }
+    });
+
+    // Update state for filtering
+    setLowStockProducts(lowStockSet);
+    setOutOfStockProducts(outOfStockSet);
+    setExpiredProducts(expiredSet);
+    setExpiringProducts(expiringSet);
+    setInvalidPricingProducts(invalidPricingSet);
+
+    return {
+      totalProducts: allProducts.length,
+      totalItems: allProducts.length,
+      totalQuantity,
+      totalStockValue,
+      totalCostValue,
+      totalMRPValue,
+      lowStockItems: lowStockCount,
+      lowStockCount,
+      outOfStockItems: outOfStockCount,
+      outOfStockCount,
+      expiredCount,
+      expiringCount,
+      categoriesCount: categories.size,
+      invalidPricingCount
+    };
+  };
+
   const fetchData = async () => {
     try {
       setIsLoading(true);
-      const [allProducts, stats] = await Promise.all([
-        getAllProducts(),
-        getInventoryStats()
-      ]);
+      setError(null);
+
+      // 🔥 Check if window.inventory API is available
+      if (!window.inventory) {
+        throw new Error('Inventory API not available. Please restart the application.');
+      }
+
+      // 🔥 Fetch ALL products from InventoryDB via IPC
+      const allProducts = await window.inventory.getAll();
+      
+      // 🔥 Calculate accurate stats from ALL products (client-side)
+      const accurateStats = calculateAccurateStats(allProducts);
+
       setProducts(allProducts);
-      setInventoryStats(stats);
-    } catch (error) {
-      console.error('Error fetching ', error);
+      setInventoryStats(accurateStats);
+
+      console.log('📊 Accurate Inventory Stats (from ALL products):', {
+        totalProducts: accurateStats.totalProducts,
+        totalQuantity: accurateStats.totalQuantity,
+        stockValue: `₹${accurateStats.totalStockValue.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`,
+        lowStock: accurateStats.lowStockCount,
+        outOfStock: accurateStats.outOfStockCount,
+        expired: accurateStats.expiredCount,
+        expiring: accurateStats.expiringCount,
+        invalidPricing: accurateStats.invalidPricingCount
+      });
+
+    } catch (err: any) {
+      console.error('Error fetching inventory:', err);
+      setError(err.message || 'Failed to load inventory data');
     } finally {
       setIsLoading(false);
     }
   };
 
   const autoSaveDailyClosing = async () => {
-    const stats = await getInventoryStats();
-    const today = new Date().toISOString().split('T')[0];
-    const existing = localStorage.getItem('dailyClosings');
-    const closings: DailyClosing[] = existing ? JSON.parse(existing) : [];
-    
-    // Check if today already saved
-    const todayIndex = closings.findIndex(c => c.date === today);
-    
-    const newClosing: DailyClosing = {
-      date: today,
-      timestamp: Date.now(),
-      totalValue: stats.totalStockValue,
-      totalQuantity: stats.totalQuantity,
-      totalProducts: stats.totalProducts,
-      lowStockCount: stats.lowStockCount,
-      outOfStockCount: stats.outOfStockCount
-    };
+    try {
+      if (!window.inventory) return;
 
-    if (todayIndex >= 0) {
-      closings[todayIndex] = newClosing;
-    } else {
-      closings.push(newClosing);
+      // Fetch ALL products and calculate accurate stats
+      const allProducts = await window.inventory.getAll();
+      const stats = calculateAccurateStats(allProducts);
+      
+      const today = new Date().toISOString().split('T')[0];
+      const existing = localStorage.getItem('dailyClosings');
+      const closings: DailyClosing[] = existing ? JSON.parse(existing) : [];
+      
+      const todayIndex = closings.findIndex(c => c.date === today);
+      
+      const newClosing: DailyClosing = {
+        date: today,
+        timestamp: Date.now(),
+        totalValue: stats.totalStockValue,
+        totalQuantity: stats.totalQuantity,
+        totalProducts: stats.totalProducts,
+        lowStockCount: stats.lowStockCount,
+        outOfStockCount: stats.outOfStockCount,
+        expiredCount: stats.expiredCount
+      };
+
+      if (todayIndex >= 0) {
+        closings[todayIndex] = newClosing;
+      } else {
+        closings.push(newClosing);
+      }
+
+      // Keep only last 90 days
+      const ninetyDaysAgo = Date.now() - (90 * 24 * 60 * 60 * 1000);
+      const filtered = closings.filter(c => c.timestamp >= ninetyDaysAgo);
+      
+      localStorage.setItem('dailyClosings', JSON.stringify(filtered));
+      setDailyClosings(filtered);
+      
+      console.log('💾 Daily closing saved:', newClosing);
+    } catch (error) {
+      console.error('Error saving daily closing:', error);
     }
-
-    // Keep only last 90 days
-    const ninetyDaysAgo = Date.now() - (90 * 24 * 60 * 60 * 1000);
-    const filtered = closings.filter(c => c.timestamp >= ninetyDaysAgo);
-    
-    localStorage.setItem('dailyClosings', JSON.stringify(filtered));
-    setDailyClosings(filtered);
   };
 
   const manualSaveDailyClosing = async () => {
@@ -171,14 +380,14 @@ export default function InventoryManagement() {
       filtered = filtered.filter(c => new Date(c.date) <= new Date(closingDateTo));
     }
 
-    // Sort by date descending
     filtered.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     setFilteredClosings(filtered);
   };
 
-  const filterProducts = async () => {
+  const filterProducts = () => {
     let filtered = [...products];
 
+    // Search filter
     if (searchTerm.trim()) {
       const term = searchTerm.toLowerCase();
       filtered = filtered.filter(p =>
@@ -186,40 +395,38 @@ export default function InventoryManagement() {
         p.itemCode.toLowerCase().includes(term) ||
         p.hsnCode?.toLowerCase().includes(term) ||
         p.batch?.toLowerCase().includes(term) ||
-        p.manufacturer?.toLowerCase().includes(term)
+        p.manufacturer?.toLowerCase().includes(term) ||
+        p.regionalName?.toLowerCase().includes(term) ||
+        p.barcode?.toLowerCase().includes(term)
       );
     }
 
+    // Category filter
     if (filterCategory !== 'all') {
       filtered = filtered.filter(p => p.category === filterCategory);
     }
 
+    // Manufacturer filter
     if (filterManufacturer !== 'all') {
       filtered = filtered.filter(p => p.manufacturer === filterManufacturer);
     }
 
+    // 🔥 Stock status filter using accurate Sets
     if (filterStockStatus !== 'all') {
-      const lowStock = await getLowStockProducts();
-      const outOfStock = await getOutOfStockProducts();
-      const expired = await getExpiredProducts();
-      const expiring = await getExpiringProducts();
-
-      const lowStockIds = new Set(lowStock.map(p => p.id));
-      const outOfStockIds = new Set(outOfStock.map(p => p.id));
-      const expiredIds = new Set(expired.map(p => p.id));
-      const expiringIds = new Set(expiring.map(p => p.id));
-
       if (filterStockStatus === 'low') {
-        filtered = filtered.filter(p => lowStockIds.has(p.id));
+        filtered = filtered.filter(p => lowStockProducts.has(p.id));
       } else if (filterStockStatus === 'out') {
-        filtered = filtered.filter(p => outOfStockIds.has(p.id));
+        filtered = filtered.filter(p => outOfStockProducts.has(p.id));
       } else if (filterStockStatus === 'expired') {
-        filtered = filtered.filter(p => expiredIds.has(p.id));
+        filtered = filtered.filter(p => expiredProducts.has(p.id));
       } else if (filterStockStatus === 'expiring') {
-        filtered = filtered.filter(p => expiringIds.has(p.id));
+        filtered = filtered.filter(p => expiringProducts.has(p.id));
+      } else if (filterStockStatus === 'invalid') {
+        filtered = filtered.filter(p => invalidPricingProducts.has(p.id));
       }
     }
 
+    // Date range filter
     if (dateFrom) {
       filtered = filtered.filter(p => new Date(p.updatedAt) >= new Date(dateFrom));
     }
@@ -236,12 +443,37 @@ export default function InventoryManagement() {
 
   const totalPages = Math.ceil(filteredProducts.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
+  
+  // 🔥 Show first 10 products in table (paginated)
   const paginatedProducts = filteredProducts.slice(startIndex, startIndex + itemsPerPage);
 
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-screen">
-        <div className="animate-spin rounded-full h-20 w-20 border-b-4 border-primary"></div>
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-20 w-20 border-b-4 border-primary mx-auto mb-4"></div>
+          <p className="text-lg font-semibold text-gray-700">Loading inventory from database...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center h-screen p-6">
+        <div className="text-center bg-red-50 border-2 border-red-200 rounded-xl p-8 max-w-md">
+          <svg className="w-16 h-16 text-red-500 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <h3 className="text-xl font-bold text-red-800 mb-3">Failed to Load Inventory</h3>
+          <p className="text-sm text-red-600 mb-6">{error}</p>
+          <button
+            onClick={fetchData}
+            className="px-6 py-3 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 transition-all"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
@@ -252,7 +484,7 @@ export default function InventoryManagement() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Inventory Management</h1>
-          <p className="text-gray-600 mt-1">View and manage all inventory stock</p>
+          <p className="text-gray-600 mt-1">SQLite Database • {products.length} total products</p>
         </div>
         <div className="flex space-x-3">
           <button
@@ -266,13 +498,7 @@ export default function InventoryManagement() {
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
             </svg>
-            <span>{saveSuccess ? 'Saved!' : 'Save Today\'s Closing'}</span>
-          </button>
-          <button
-            onClick={() => setShowProductSearch(true)}
-            className="px-6 py-3 bg-gradient-to-r from-purple-500 to-purple-600 text-white rounded-xl font-semibold hover:shadow-xl transition-all"
-          >
-            Search Products
+            <span>{saveSuccess ? '✓ Saved!' : 'Save Today\'s Closing'}</span>
           </button>
           <button
             onClick={() => setShowStockImport(true)}
@@ -283,18 +509,18 @@ export default function InventoryManagement() {
         </div>
       </div>
 
-      {/* Analytics Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+      {/* 🔥 Analytics Cards - 100% Accurate from ALL products */}
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
         <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-4 border-l-4 border-blue-500">
           <p className="text-xs text-blue-700 font-bold mb-1">Total Products</p>
           <p className="text-2xl font-bold text-blue-900">{inventoryStats.totalProducts}</p>
         </div>
         <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-xl p-4 border-l-4 border-green-500">
           <p className="text-xs text-green-700 font-bold mb-1">Total Quantity</p>
-          <p className="text-2xl font-bold text-green-900">{inventoryStats.totalQuantity}</p>
+          <p className="text-2xl font-bold text-green-900">{inventoryStats.totalQuantity.toLocaleString()}</p>
         </div>
         <div className="bg-gradient-to-br from-emerald-50 to-emerald-100 rounded-xl p-4 border-l-4 border-emerald-500">
-          <p className="text-xs text-emerald-700 font-bold mb-1">Stock Value</p>
+          <p className="text-xs text-emerald-700 font-bold mb-1">Stock Value (SRate)</p>
           <p className="text-2xl font-bold text-emerald-900">₹{(inventoryStats.totalStockValue / 1000).toFixed(1)}K</p>
         </div>
         <div className="bg-gradient-to-br from-red-50 to-red-100 rounded-xl p-4 border-l-4 border-red-500">
@@ -313,9 +539,13 @@ export default function InventoryManagement() {
           <p className="text-xs text-pink-700 font-bold mb-1">Expiring Soon</p>
           <p className="text-2xl font-bold text-pink-900">{inventoryStats.expiringCount}</p>
         </div>
+        <div className="bg-gradient-to-br from-yellow-50 to-yellow-100 rounded-xl p-4 border-l-4 border-yellow-500">
+          <p className="text-xs text-yellow-700 font-bold mb-1">Price Errors</p>
+          <p className="text-2xl font-bold text-yellow-900">{inventoryStats.invalidPricingCount}</p>
+        </div>
       </div>
 
-      {/* Daily Closing Report with Date Filters */}
+      {/* Daily Closing Report */}
       <div className="bg-white rounded-xl shadow-md p-5 border border-gray-200">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-bold text-gray-900">Daily Stock Closing History</h3>
@@ -356,22 +586,33 @@ export default function InventoryManagement() {
               <thead className="bg-gradient-to-r from-indigo-500 to-indigo-600 text-white">
                 <tr>
                   <th className="px-4 py-2 text-left font-bold">Date</th>
-                  <th className="px-4 py-2 text-right font-bold">Total Value</th>
+                  <th className="px-4 py-2 text-right font-bold">Stock Value (SRate)</th>
                   <th className="px-4 py-2 text-center font-bold">Products</th>
                   <th className="px-4 py-2 text-center font-bold">Quantity</th>
                   <th className="px-4 py-2 text-center font-bold">Low Stock</th>
                   <th className="px-4 py-2 text-center font-bold">Out of Stock</th>
+                  <th className="px-4 py-2 text-center font-bold">Expired</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
                 {filteredClosings.slice(0, 30).map((closing, idx) => (
                   <tr key={idx} className="hover:bg-indigo-50">
-                    <td className="px-4 py-2 font-bold text-gray-900">{new Date(closing.date).toLocaleDateString('en-IN', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}</td>
-                    <td className="px-4 py-2 text-right font-bold text-green-700">₹{closing.totalValue.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                    <td className="px-4 py-2 font-bold text-gray-900">
+                      {new Date(closing.date).toLocaleDateString('en-IN', { 
+                        weekday: 'short', 
+                        year: 'numeric', 
+                        month: 'short', 
+                        day: 'numeric' 
+                      })}
+                    </td>
+                    <td className="px-4 py-2 text-right font-bold text-green-700">
+                      ₹{closing.totalValue.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                    </td>
                     <td className="px-4 py-2 text-center font-semibold text-blue-700">{closing.totalProducts}</td>
                     <td className="px-4 py-2 text-center font-semibold text-purple-700">{closing.totalQuantity}</td>
                     <td className="px-4 py-2 text-center font-semibold text-orange-700">{closing.lowStockCount}</td>
                     <td className="px-4 py-2 text-center font-semibold text-red-700">{closing.outOfStockCount}</td>
+                    <td className="px-4 py-2 text-center font-semibold text-purple-700">{closing.expiredCount || 0}</td>
                   </tr>
                 ))}
               </tbody>
@@ -427,6 +668,7 @@ export default function InventoryManagement() {
             <option value="out">Out of Stock Only</option>
             <option value="expired">Expired Only</option>
             <option value="expiring">Expiring Soon</option>
+            <option value="invalid">Price Errors (SRate &gt; MRP)</option>
           </select>
           <input
             type="date"
@@ -439,7 +681,7 @@ export default function InventoryManagement() {
         <div className="mt-3 flex items-center justify-between">
           <p className="text-sm text-gray-600">
             Showing <span className="font-bold">{paginatedProducts.length}</span> of{' '}
-            <span className="font-bold">{filteredProducts.length}</span> products
+            <span className="font-bold">{filteredProducts.length}</span> filtered • Total: <span className="font-bold">{products.length}</span>
           </p>
           <button
             onClick={() => {
@@ -457,7 +699,7 @@ export default function InventoryManagement() {
         </div>
       </div>
 
-      {/* Excel-Style Inventory Table */}
+      {/* 🔥 Excel-Style Table - Shows paginated products (10 per page) */}
       <div className="bg-white rounded-xl shadow-lg overflow-hidden border border-gray-200">
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
@@ -481,15 +723,19 @@ export default function InventoryManagement() {
             </thead>
             <tbody className="divide-y divide-gray-200">
               {paginatedProducts.map((product) => {
-                const isLowStock = product.stockQuantity <= product.rol && product.stockQuantity > 0;
-                const isOutOfStock = product.stockQuantity === 0;
-                const isExpired = product.hasExpiryDate && product.expiryDate && new Date(product.expiryDate) < new Date();
+                const isLowStock = lowStockProducts.has(product.id);
+                const isOutOfStock = outOfStockProducts.has(product.id);
+                const isExpired = expiredProducts.has(product.id);
+                const hasInvalidPricing = invalidPricingProducts.has(product.id);
                 
                 return (
                   <tr
                     key={product.id}
                     className={`hover:bg-primary/5 cursor-pointer ${
-                      isOutOfStock ? 'bg-red-50' : isLowStock ? 'bg-yellow-50' : isExpired ? 'bg-purple-50' : ''
+                      isOutOfStock ? 'bg-red-50' : 
+                      isLowStock ? 'bg-yellow-50' : 
+                      isExpired ? 'bg-purple-50' : 
+                      hasInvalidPricing ? 'bg-orange-50' : ''
                     }`}
                     onClick={() => setSelectedProduct(product)}
                   >
@@ -505,7 +751,9 @@ export default function InventoryManagement() {
                     </td>
                     <td className="px-3 py-2.5 text-center text-gray-600">{product.rol}</td>
                     <td className="px-3 py-2.5 text-right font-semibold">₹{product.purchasePrice.toFixed(2)}</td>
-                    <td className="px-3 py-2.5 text-right font-semibold text-green-700">₹{product.sellingPriceTab.toFixed(2)}</td>
+                    <td className={`px-3 py-2.5 text-right font-semibold ${hasInvalidPricing ? 'text-red-700' : 'text-green-700'}`}>
+                      ₹{product.sellingPriceTab.toFixed(2)}
+                    </td>
                     <td className="px-3 py-2.5 text-right font-semibold">₹{product.mrp.toFixed(2)}</td>
                     <td className="px-3 py-2.5 text-center">{product.cgstRate + product.sgstRate}%</td>
                     <td className="px-3 py-2.5 text-center text-xs">
@@ -520,7 +768,8 @@ export default function InventoryManagement() {
                       {isOutOfStock && <span className="px-2 py-1 bg-red-500 text-white text-[10px] font-bold rounded-full">OUT</span>}
                       {isLowStock && !isOutOfStock && <span className="px-2 py-1 bg-orange-500 text-white text-[10px] font-bold rounded-full">LOW</span>}
                       {isExpired && <span className="px-2 py-1 bg-purple-500 text-white text-[10px] font-bold rounded-full">EXP</span>}
-                      {!isOutOfStock && !isLowStock && !isExpired && <span className="px-2 py-1 bg-green-500 text-white text-[10px] font-bold rounded-full">OK</span>}
+                      {hasInvalidPricing && <span className="px-2 py-1 bg-yellow-500 text-white text-[10px] font-bold rounded-full">ERR</span>}
+                      {!isOutOfStock && !isLowStock && !isExpired && !hasInvalidPricing && <span className="px-2 py-1 bg-green-500 text-white text-[10px] font-bold rounded-full">OK</span>}
                     </td>
                   </tr>
                 );
@@ -534,17 +783,17 @@ export default function InventoryManagement() {
           <button
             onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
             disabled={currentPage === 1}
-            className="px-4 py-2 bg-primary text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-4 py-2 bg-primary text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed font-semibold hover:shadow-lg transition-all"
           >
             Previous
           </button>
           <span className="text-sm font-semibold text-gray-700">
-            Page {currentPage} of {totalPages}
+            Page {currentPage} of {totalPages || 1}
           </span>
           <button
             onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-            disabled={currentPage === totalPages}
-            className="px-4 py-2 bg-primary text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={currentPage === totalPages || totalPages === 0}
+            className="px-4 py-2 bg-primary text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed font-semibold hover:shadow-lg transition-all"
           >
             Next
           </button>
@@ -557,7 +806,7 @@ export default function InventoryManagement() {
           <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden">
             <div className="bg-gradient-to-r from-primary to-indigo-600 text-white px-6 py-4 flex justify-between items-center">
               <h2 className="text-xl font-bold">Product Details</h2>
-              <button onClick={() => setSelectedProduct(null)} className="p-2 hover:bg-white/10 rounded-lg">
+              <button onClick={() => setSelectedProduct(null)} className="p-2 hover:bg-white/10 rounded-lg transition-all">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
@@ -578,20 +827,20 @@ export default function InventoryManagement() {
                   <p className="text-2xl font-bold text-blue-700">{selectedProduct.stockQuantity}</p>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-xs text-gray-600 font-bold">Reorder Level</p>
+                  <p className="text-xs text-gray-600 font-bold">Reorder Level (ROL)</p>
                   <p className="text-xl font-bold text-orange-700">{selectedProduct.rol}</p>
                 </div>
                 <div className="space-y-2">
                   <p className="text-xs text-gray-600 font-bold">Purchase Price</p>
-                  <p className="text-xl font-bold text-green-700">₹{selectedProduct.purchasePrice}</p>
+                  <p className="text-xl font-bold text-green-700">₹{selectedProduct.purchasePrice.toFixed(2)}</p>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-xs text-gray-600 font-bold">Selling Price</p>
-                  <p className="text-xl font-bold text-teal-700">₹{selectedProduct.sellingPriceTab}</p>
+                  <p className="text-xs text-gray-600 font-bold">Selling Price (SRate)</p>
+                  <p className="text-xl font-bold text-teal-700">₹{selectedProduct.sellingPriceTab.toFixed(2)}</p>
                 </div>
                 <div className="space-y-2">
                   <p className="text-xs text-gray-600 font-bold">MRP</p>
-                  <p className="text-xl font-bold text-indigo-700">₹{selectedProduct.mrp}</p>
+                  <p className="text-xl font-bold text-indigo-700">₹{selectedProduct.mrp.toFixed(2)}</p>
                 </div>
                 <div className="space-y-2">
                   <p className="text-xs text-gray-600 font-bold">HSN Code</p>
@@ -623,9 +872,15 @@ export default function InventoryManagement() {
         </div>
       )}
 
-      {/* Modals */}
-      {showStockImport && <StockImport onClose={() => { setShowStockImport(false); fetchData(); }} />}
-      {showProductSearch && <ProductSearch />}
+      {/* Stock Import Modal */}
+      {showStockImport && (
+        <StockImport 
+          onClose={() => { 
+            setShowStockImport(false); 
+            fetchData(); 
+          }} 
+        />
+      )}
     </div>
   );
 }
