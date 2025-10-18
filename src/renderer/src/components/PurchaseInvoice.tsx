@@ -1,957 +1,1714 @@
-// src/components/SalesInvoice.tsx
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { getAllProducts } from '../services/inventoryDB';
+  // src/components/PurchaseInvoice.tsx
+// ULTIMATE WIDESCREEN PURCHASE INVOICE - PLAIN ADVANCED BILL WITH PROFIT
+// COMPLETE INVENTORY MAPPING - PRINT & PDF SAVE - NO LAZY CODE
 
-// Inventory product type (normalize fields from DB to these names)
-type InvProduct = {
+import { useState, useEffect } from 'react';
+import {
+  savePurchaseInvoice,
+  type PurchaseInvoiceRecord,
+} from '../services/purchaseDB';
+
+// Inventory API
+declare global {
+  interface Window {
+    inventory?: {
+      getAll: () => Promise<any[]>;
+      addOrUpdate: (product: any) => Promise<{ success: boolean }>;
+      incrementStockByCodeBatch: (code: string, batch: string, qty: number) => Promise<any>;
+      getByCodeAndBatch: (code: string, batch: string) => Promise<any>;
+    };
+  }
+}
+
+// Types
+type PurchaseItem = {
   id: string;
-  itemCode: string;
-  itemName: string;
-  batch?: string;
-  expiryDate?: string;       // ISO or MM/YY
-  pack?: number;             // pack size per unit (optional)
-  mrp?: number;              // MRP per unit/strip
-  sellingPrice?: number;     // selling rate per unit/strip
-  cgstRate?: number;         // %
-  sgstRate?: number;         // %
-  stockQuantity?: number;
+  slNo: number;
+  qty: number;
+  free: number;
+  mfr: string;
+  pack: number;
+  productName: string;
+  batch: string;
+  exp: string;
+  hsn: string;
+  mrp: number;
+  rate: number;
+  dis: number;
+  sgst: number;
+  sgstValue: number;
+  cgst: number;
+  cgstValue: number;
+  value: number;
 };
 
-interface InvoiceItem {
-  no: number;
+type ProductBatch = {
   itemCode: string;
   itemName: string;
   batch: string;
   expiryDate: string;
-  quantity: number;
-  pack: number;
   mrp: number;
-  rate: number;
-  grossAmt: number;
-  cgstPercent: number;
-  cgstAmt: number;
-  sgstPercent: number;
-  sgstAmt: number;
-  total: number;
-}
-
-type PickedRow = {
-  product: InvProduct;
-  batch: string;
-  expiryDate: string;
-  mrp: number;
-  rate: number;
-  cgstPercent: number;
-  sgstPercent: number;
-  pack: number;
-  quantity: number;
+  stockQuantity: number;
+  cgstRate: number;
+  sgstRate: number;
+  hsnCode: string;
+  manufacturer: string;
+  packSize: number;
+  purchasePrice: number;
 };
 
-// ---------------- Product Search Modal ----------------
-
-function normalizeExpiry(exp?: string) {
-  if (!exp) return '';
-  if (/^\d{2}\/\d{2}$/.test(exp)) return exp;
-  const d = new Date(exp);
-  if (Number.isNaN(d.getTime())) return exp;
-  const mm = `${d.getMonth() + 1}`.padStart(2, '0');
-  const yy = `${d.getFullYear()}`.slice(-2);
-  return `${mm}/${yy}`;
+// Utilities
+function fmtINR(n: number) {
+  return `₹${(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function ProductSearchModal({
-  open,
-  prefix,
-  products,
-  onClose,
-  onSelect
-}: {
-  open: boolean;
-  prefix: string;
-  products: InvProduct[];
-  onClose: () => void;
-  onSelect: (picked: PickedRow) => void;
-}) {
-  const [query, setQuery] = useState(prefix || '');
-  const [activeCode, setActiveCode] = useState<string | null>(null);
-  const [qty, setQty] = useState<number>(1);
+function toDisplayDate(iso: string) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  } catch {
+    return iso;
+  }
+}
 
+function generateId() {
+  return Math.random().toString(36).substr(2, 9);
+}
+
+export default function PurchaseInvoice() {
+  // Header Info
+  const [invoiceNo, setInvoiceNo] = useState('');
+  const [invoiceDate, setInvoiceDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [dueDate, setDueDate] = useState<string>('');
+  const [orderDate, setOrderDate] = useState<string>('');
+  const [lrNo, setLrNo] = useState('');
+  const [lrDate, setLrDate] = useState<string>('');
+  const [cases, setCases] = useState<number | ''>('');
+  const [transport, setTransport] = useState('');
+
+  // Party Info
+  const [partyName, setPartyName] = useState('');
+  const [partyAddress, setPartyAddress] = useState('');
+  const [partyPhone, setPartyPhone] = useState('');
+  const [partyGSTIN, setPartyGSTIN] = useState('');
+  const [partyState, setPartyState] = useState('Kerala');
+  const [partyStateCode, setPartyStateCode] = useState('32');
+
+  // Items
+  const [items, setItems] = useState<PurchaseItem[]>([
+    {
+      id: generateId(),
+      slNo: 1,
+      qty: 0,
+      free: 0,
+      mfr: '',
+      pack: 1,
+      productName: '',
+      batch: '',
+      exp: '',
+      hsn: '',
+      mrp: 0,
+      rate: 0,
+      dis: 0,
+      sgst: 0,
+      sgstValue: 0,
+      cgst: 0,
+      cgstValue: 0,
+      value: 0,
+    },
+  ]);
+
+  // Product Search
+  const [showProductSearch, setShowProductSearch] = useState(false);
+  const [productQuery, setProductQuery] = useState('');
+  const [allProducts, setAllProducts] = useState<ProductBatch[]>([]);
+  const [filteredProducts, setFilteredProducts] = useState<ProductBatch[]>([]);
+  const [currentEditingRow, setCurrentEditingRow] = useState<string | null>(null);
+
+  // Bill Preview
+  const [showBillPreview, setShowBillPreview] = useState(false);
+  const [billPreviewHTML, setBillPreviewHTML] = useState('');
+
+  // Toast
+  const [toast, setToast] = useState<{ show: boolean; message: string; type: 'success' | 'error' }>({
+    show: false,
+    message: '',
+    type: 'success',
+  });
+
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ show: true, message, type });
+    setTimeout(() => setToast({ show: false, message: '', type: 'success' }), 3500);
+  };
+
+  // Load products
   useEffect(() => {
-    setQuery(prefix || '');
-  }, [prefix]);
+    const loadProducts = async () => {
+      if (!window.inventory?.getAll) return;
+      try {
+        const products = await window.inventory.getAll();
+        const formatted = products.map((p: any) => ({
+          itemCode: p.itemCode || '',
+          itemName: p.itemName || '',
+          batch: p.batch || '',
+          expiryDate: p.expiryDate || '',
+          mrp: Number(p.mrp || 0),
+          stockQuantity: Number(p.stockQuantity || 0),
+          cgstRate: Number(p.cgstRate || 0),
+          sgstRate: Number(p.sgstRate || 0),
+          hsnCode: p.hsnCode || '',
+          manufacturer: p.manufacturer || '',
+          packSize: Number(p.packSize || 1),
+          purchasePrice: Number(p.purchasePrice || 0),
+        }));
+        setAllProducts(formatted);
+      } catch (error) {
+        console.error('Failed to load products:', error);
+      }
+    };
+    loadProducts();
+  }, []);
 
-  const heads = useMemo(() => {
-    const map = new Map<string, InvProduct>();
-    const q = query.trim().toLowerCase();
-    products.forEach(p => {
-      const code = p.itemCode || '';
-      const name = p.itemName || '';
-      const hay = `${code} ${name}`.toLowerCase();
-      if (q && !hay.includes(q)) return;
-      const key = `${code}||${name}`;
-      if (!map.has(key)) map.set(key, p);
+  // Filter products
+  useEffect(() => {
+    if (!productQuery.trim()) {
+      setFilteredProducts([]);
+      return;
+    }
+    const q = productQuery.toLowerCase();
+    const filtered = allProducts.filter(
+      p =>
+        p.itemCode.toLowerCase().includes(q) ||
+        p.itemName.toLowerCase().includes(q) ||
+        p.batch.toLowerCase().includes(q)
+    );
+    setFilteredProducts(filtered.slice(0, 50));
+  }, [productQuery, allProducts]);
+
+  // Open product search
+  const openProductSearch = (rowId: string) => {
+    setCurrentEditingRow(rowId);
+    setProductQuery('');
+    setShowProductSearch(true);
+  };
+
+  // Select product
+  const selectProduct = (product: ProductBatch) => {
+    if (!currentEditingRow) return;
+
+    const updatedItems = items.map(item => {
+      if (item.id === currentEditingRow) {
+        return {
+          ...item,
+          productName: product.itemName,
+          batch: product.batch,
+          exp: product.expiryDate,
+          hsn: product.hsnCode,
+          mrp: product.mrp,
+          rate: product.purchasePrice || product.mrp * 0.8,
+          mfr: product.manufacturer,
+          pack: product.packSize,
+          cgst: product.cgstRate,
+          sgst: product.sgstRate,
+        };
+      }
+      return item;
     });
-    return Array.from(map.values()).sort((a, b) => (a.itemCode || '').localeCompare(b.itemCode || ''));
-  }, [products, query]);
 
-  const batchRows = useMemo(() => {
-    if (!activeCode) return [];
-    return products
-      .filter(p => p.itemCode === activeCode)
-      .map(p => ({
-        ...p,
-        batch: p.batch || '-',
-        expiry: normalizeExpiry(p.expiryDate || ''),
-        mrpN: Number(p.mrp || 0),
-        rateN: Number(p.sellingPrice || 0),
-        cgstN: Number(p.cgstRate || 0),
-        sgstN: Number(p.sgstRate || 0),
-        packN: Number(p.pack || 1),
-        stockN: Number(p.stockQuantity || 0),
-      }))
-      .sort((a, b) => (a.batch || '').localeCompare(b.batch || ''));
-  }, [products, activeCode]);
+    setItems(updatedItems);
+    setShowProductSearch(false);
+    setCurrentEditingRow(null);
+    showToast('Product added to invoice');
+  };
 
-  if (!open) return null;
+  // Calculate row
+  const calculateRow = (item: PurchaseItem): PurchaseItem => {
+    const grossAmount = item.qty * item.rate;
+    const discountAmount = (grossAmount * item.dis) / 100;
+    const taxableAmount = grossAmount - discountAmount;
+    const cgstValue = (taxableAmount * item.cgst) / 100;
+    const sgstValue = (taxableAmount * item.sgst) / 100;
+    const value = taxableAmount + cgstValue + sgstValue;
 
-  return (
-    <div className="fixed inset-0 z-[80] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white w-full max-w-5xl rounded-xl shadow-2xl overflow-hidden">
-        <div className="px-4 py-3 bg-slate-800 text-white flex items-center justify-between">
-          <h3 className="text-sm font-bold">Product Search (Inventory)</h3>
-          <button onClick={onClose} className="px-2 py-1 rounded hover:bg-white/10">Close</button>
-        </div>
+    return {
+      ...item,
+      cgstValue: Number(cgstValue.toFixed(2)),
+      sgstValue: Number(sgstValue.toFixed(2)),
+      value: Number(value.toFixed(2)),
+    };
+  };
 
-        <div className="p-4 grid grid-cols-5 gap-4">
-          {/* Code/Name list */}
-          <div className="col-span-2 border rounded-lg overflow-hidden">
-            <div className="p-2 border-b bg-slate-50">
-              <input
-                autoFocus
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-                placeholder="Search by Item Code / Name"
-                className="w-full px-3 py-2 text-sm border rounded"
-              />
+  // Update item
+  const updateItem = (id: string, field: keyof PurchaseItem, value: any) => {
+    const updated = items.map(item => {
+      if (item.id === id) {
+        const newItem = { ...item, [field]: value };
+        return calculateRow(newItem);
+      }
+      return item;
+    });
+    setItems(updated);
+  };
+
+  // Add row
+  const addRow = () => {
+    const newRow: PurchaseItem = {
+      id: generateId(),
+      slNo: items.length + 1,
+      qty: 0,
+      free: 0,
+      mfr: '',
+      pack: 1,
+      productName: '',
+      batch: '',
+      exp: '',
+      hsn: '',
+      mrp: 0,
+      rate: 0,
+      dis: 0,
+      sgst: 0,
+      sgstValue: 0,
+      cgst: 0,
+      cgstValue: 0,
+      value: 0,
+    };
+    setItems([...items, newRow]);
+  };
+
+  // Delete row
+  const deleteRow = (id: string) => {
+    if (items.length === 1) {
+      showToast('Cannot delete the last row', 'error');
+      return;
+    }
+    const filtered = items.filter(item => item.id !== id);
+    const renumbered = filtered.map((item, idx) => ({ ...item, slNo: idx + 1 }));
+    setItems(renumbered);
+  };
+
+  // Calculate totals
+  const totals = items.reduce(
+    (acc, item) => {
+      const grossAmount = item.qty * item.rate;
+      const discountAmount = (grossAmount * item.dis) / 100;
+      const taxableAmount = grossAmount - discountAmount;
+      
+      // Calculate potential profit (MRP - Purchase Rate)
+      const potentialProfitPerUnit = item.mrp - item.rate;
+      const totalPotentialProfit = potentialProfitPerUnit * item.qty;
+
+      return {
+        totalQty: acc.totalQty + item.qty,
+        totalFree: acc.totalFree + item.free,
+        scheme: acc.scheme + discountAmount,
+        discount: acc.discount,
+        sgst: acc.sgst + item.sgstValue,
+        cgst: acc.cgst + item.cgstValue,
+        totalGST: acc.totalGST + item.cgstValue + item.sgstValue,
+        total: acc.total + item.value,
+        potentialProfit: acc.potentialProfit + totalPotentialProfit,
+        totalMRPValue: acc.totalMRPValue + (item.mrp * item.qty),
+      };
+    },
+    { 
+      totalQty: 0, 
+      totalFree: 0, 
+      scheme: 0, 
+      discount: 0, 
+      sgst: 0, 
+      cgst: 0, 
+      totalGST: 0, 
+      total: 0,
+      potentialProfit: 0,
+      totalMRPValue: 0,
+    }
+  );
+
+  // GST breakdown
+  const gstBreakdown = items.reduce((acc, item) => {
+    const grossAmount = item.qty * item.rate;
+    const discountAmount = (grossAmount * item.dis) / 100;
+    const taxableAmount = grossAmount - discountAmount;
+    const gstRate = item.cgst + item.sgst;
+
+    if (gstRate > 0 && item.qty > 0) {
+      if (!acc[gstRate]) {
+        acc[gstRate] = { taxable: 0, cgst: 0, sgst: 0 };
+      }
+      acc[gstRate].taxable += taxableAmount;
+      acc[gstRate].cgst += item.cgstValue;
+      acc[gstRate].sgst += item.sgstValue;
+    }
+
+    return acc;
+  }, {} as Record<number, { taxable: number; cgst: number; sgst: number }>);
+
+  // Generate PLAIN WHITE ADVANCED BILL with PROFIT
+  const generateBillPreviewHTML = () => {
+    const validItems = items.filter(i => i.productName && i.qty > 0);
+    
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>Purchase Invoice - ${invoiceNo}</title>
+        <style>
+          @page { size: A4 landscape; margin: 20mm; }
+          @media print { 
+            body { margin: 0; padding: 0; }
+            .no-print { display: none; }
+          }
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body { 
+            font-family: 'Arial', sans-serif; 
+            font-size: 10px;
+            color: #000;
+            background: #fff;
+            line-height: 1.4;
+          }
+          .container { 
+            width: 100%; 
+            max-width: 297mm;
+            margin: 0 auto;
+            padding: 20px;
+            background: #fff;
+          }
+          .header {
+            text-align: center;
+            border: 2px solid #000;
+            padding: 20px;
+            margin-bottom: 15px;
+          }
+          .header h1 {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+          }
+          .header h2 {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+          }
+          .header p {
+            font-size: 10px;
+            line-height: 1.6;
+            margin: 3px 0;
+          }
+          .info-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 15px;
+          }
+          .info-box {
+            border: 2px solid #000;
+            padding: 15px;
+          }
+          .info-box-title {
+            font-weight: bold;
+            font-size: 11px;
+            margin-bottom: 10px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #000;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+          }
+          .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            font-size: 10px;
+          }
+          .info-label {
+            font-weight: bold;
+            min-width: 120px;
+          }
+          .info-value {
+            flex: 1;
+            text-align: right;
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 15px;
+            border: 2px solid #000;
+          }
+          th {
+            background: #fff;
+            color: #000;
+            font-weight: bold;
+            padding: 10px 8px;
+            text-align: center;
+            font-size: 9px;
+            border: 1px solid #000;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+          }
+          td {
+            padding: 8px 6px;
+            border: 1px solid #000;
+            font-size: 9px;
+            text-align: center;
+          }
+          td.left { text-align: left; }
+          td.right { text-align: right; }
+          .totals-grid {
+            display: grid;
+            grid-template-columns: 1.5fr 1fr;
+            gap: 15px;
+            margin-top: 15px;
+          }
+          .gst-breakdown {
+            border: 2px solid #000;
+            padding: 15px;
+          }
+          .gst-breakdown-title {
+            font-weight: bold;
+            font-size: 12px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+          }
+          .gst-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+          }
+          .gst-table th {
+            background: #fff;
+            font-size: 9px;
+            padding: 8px 6px;
+            border: 1px solid #000;
+          }
+          .gst-table td {
+            font-size: 9px;
+            padding: 6px;
+            border: 1px solid #000;
+          }
+          .summary-box {
+            border: 2px solid #000;
+            padding: 15px;
+          }
+          .summary-title {
+            font-weight: bold;
+            font-size: 12px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+          }
+          .summary-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            font-size: 11px;
+            border-bottom: 1px solid #ddd;
+          }
+          .summary-row:last-child {
+            border-bottom: none;
+          }
+          .summary-row.grand {
+            font-size: 16px;
+            font-weight: bold;
+            padding-top: 12px;
+            margin-top: 10px;
+            border-top: 2px solid #000;
+          }
+          .profit-section {
+            background: #fff;
+            border: 2px solid #000;
+            padding: 15px;
+            margin-top: 15px;
+          }
+          .profit-title {
+            font-weight: bold;
+            font-size: 12px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+          }
+          .profit-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            font-size: 11px;
+            border-bottom: 1px solid #ddd;
+          }
+          .footer {
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 2px solid #000;
+            text-align: center;
+            font-size: 9px;
+          }
+          .footer p {
+            margin: 4px 0;
+          }
+          .signature-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #000;
+          }
+          .signature-box {
+            text-align: center;
+            padding-top: 40px;
+            border-top: 1px solid #000;
+            font-size: 10px;
+            font-weight: bold;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <!-- Header -->
+          <div class="header">
+            <h1>PENCOS MEDICALS</h1>
+            <h2>PURCHASE INVOICE / GST CREDIT NOTE</h2>
+            <p>MELEPANDIYIL BUILDING, CHENGANNUR, KERALA-690514</p>
+            <p>Phone: 9497370571, 9447207537</p>
+            <p>GSTIN: 32AAXFM5083E1Z1 | State: Kerala (Code: 32)</p>
+          </div>
+
+          <!-- Info Grid -->
+          <div class="info-grid">
+            <div class="info-box">
+              <div class="info-box-title">Supplier Details</div>
+              <div class="info-row">
+                <span class="info-label">Supplier Name:</span>
+                <span class="info-value">${partyName || 'N/A'}</span>
+              </div>
+              ${partyAddress ? `<div class="info-row">
+                <span class="info-label">Address:</span>
+                <span class="info-value">${partyAddress}</span>
+              </div>` : ''}
+              ${partyPhone ? `<div class="info-row">
+                <span class="info-label">Phone:</span>
+                <span class="info-value">${partyPhone}</span>
+              </div>` : ''}
+              ${partyGSTIN ? `<div class="info-row">
+                <span class="info-label">GSTIN:</span>
+                <span class="info-value">${partyGSTIN}</span>
+              </div>` : ''}
+              ${partyState ? `<div class="info-row">
+                <span class="info-label">State:</span>
+                <span class="info-value">${partyState} (${partyStateCode})</span>
+              </div>` : ''}
             </div>
-            <div className="max-h-[380px] overflow-auto">
-              <table className="w-full text-xs">
-                <thead className="bg-slate-100 sticky top-0">
-                  <tr>
-                    <th className="px-2 py-2 text-left">Item Code</th>
-                    <th className="px-2 py-2 text-left">Item Name</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {heads.map((p, i) => (
-                    <tr
-                      key={`${p.itemCode}-${i}`}
-                      onClick={() => setActiveCode(p.itemCode)}
-                      className={`cursor-pointer hover:bg-blue-50 ${activeCode === p.itemCode ? 'bg-blue-100' : ''}`}
-                    >
-                      <td className="px-2 py-1.5 font-mono font-bold">{p.itemCode}</td>
-                      <td className="px-2 py-1.5">{p.itemName}</td>
-                    </tr>
-                  ))}
-                  {heads.length === 0 && (
-                    <tr>
-                      <td className="px-2 py-3 text-center text-slate-500" colSpan={2}>No products</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+            <div class="info-box">
+              <div class="info-box-title">Invoice Details</div>
+              <div class="info-row">
+                <span class="info-label">Invoice Number:</span>
+                <span class="info-value" style="font-weight:bold;font-size:12px;">${invoiceNo}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">Invoice Date:</span>
+                <span class="info-value">${toDisplayDate(invoiceDate)}</span>
+              </div>
+              ${dueDate ? `<div class="info-row">
+                <span class="info-label">Due Date:</span>
+                <span class="info-value">${toDisplayDate(dueDate)}</span>
+              </div>` : ''}
+              ${orderDate ? `<div class="info-row">
+                <span class="info-label">Order Date:</span>
+                <span class="info-value">${toDisplayDate(orderDate)}</span>
+              </div>` : ''}
+              ${lrNo ? `<div class="info-row">
+                <span class="info-label">L.R. Number:</span>
+                <span class="info-value">${lrNo}</span>
+              </div>` : ''}
+              ${lrDate ? `<div class="info-row">
+                <span class="info-label">L.R. Date:</span>
+                <span class="info-value">${toDisplayDate(lrDate)}</span>
+              </div>` : ''}
+              ${cases ? `<div class="info-row">
+                <span class="info-label">Cases:</span>
+                <span class="info-value">${cases}</span>
+              </div>` : ''}
+              ${transport ? `<div class="info-row">
+                <span class="info-label">Transport:</span>
+                <span class="info-value">${transport}</span>
+              </div>` : ''}
             </div>
           </div>
 
-          {/* Batch list for selected code */}
-          <div className="col-span-3 border rounded-lg overflow-hidden">
-            <div className="px-3 py-2 bg-slate-50 border-b flex items-center justify-between">
-              <div className="text-sm font-semibold">Batches {activeCode ? `for ${activeCode}` : ''}</div>
-              <div className="flex items-center space-x-2">
-                <label className="text-xs font-semibold">Qty</label>
+          <!-- Items Table -->
+          <table>
+            <thead>
+              <tr>
+                <th style="width:30px;">#</th>
+                <th style="width:45px;">QTY</th>
+                <th style="width:45px;">FREE</th>
+                <th style="width:70px;">MFR</th>
+                <th style="width:40px;">PACK</th>
+                <th style="width:200px;">PRODUCT NAME</th>
+                <th style="width:75px;">BATCH</th>
+                <th style="width:55px;">EXP</th>
+                <th style="width:60px;">HSN</th>
+                <th style="width:65px;">M.R.P</th>
+                <th style="width:65px;">RATE</th>
+                <th style="width:45px;">DIS%</th>
+                <th style="width:50px;">SGST%</th>
+                <th style="width:65px;">SGST</th>
+                <th style="width:50px;">CGST%</th>
+                <th style="width:65px;">CGST</th>
+                <th style="width:80px;">VALUE</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${validItems.map((item, idx) => `
+                <tr>
+                  <td>${idx + 1}</td>
+                  <td style="font-weight:bold;">${item.qty}</td>
+                  <td>${item.free || '-'}</td>
+                  <td class="left" style="font-size:8px;">${item.mfr || '-'}</td>
+                  <td>${item.pack || 1}</td>
+                  <td class="left" style="font-weight:600;font-size:9px;">${item.productName}</td>
+                  <td style="font-family:monospace;font-weight:bold;font-size:8px;">${item.batch}</td>
+                  <td style="font-size:8px;">${item.exp || '-'}</td>
+                  <td>${item.hsn || '-'}</td>
+                  <td class="right" style="font-weight:600;">₹${item.mrp.toFixed(2)}</td>
+                  <td class="right" style="font-weight:bold;">₹${item.rate.toFixed(2)}</td>
+                  <td>${item.dis || 0}%</td>
+                  <td>${item.sgst}%</td>
+                  <td class="right">₹${item.sgstValue.toFixed(2)}</td>
+                  <td>${item.cgst}%</td>
+                  <td class="right">₹${item.cgstValue.toFixed(2)}</td>
+                  <td class="right" style="font-weight:bold;font-size:10px;">₹${item.value.toFixed(2)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+            <tfoot style="background:#f5f5f5;">
+              <tr style="font-weight:bold;">
+                <td>TOTAL</td>
+                <td>${totals.totalQty}</td>
+                <td>${totals.totalFree}</td>
+                <td colspan="10"></td>
+                <td class="right">₹${totals.sgst.toFixed(2)}</td>
+                <td></td>
+                <td class="right">₹${totals.cgst.toFixed(2)}</td>
+                <td class="right" style="font-size:12px;">₹${totals.total.toFixed(2)}</td>
+              </tr>
+            </tfoot>
+          </table>
+
+          <!-- Totals Grid -->
+          <div class="totals-grid">
+            <div class="gst-breakdown">
+              <div class="gst-breakdown-title">GST Breakdown</div>
+              <table class="gst-table">
+                <thead>
+                  <tr>
+                    <th>GST RATE</th>
+                    <th>TAXABLE AMOUNT</th>
+                    <th>CGST</th>
+                    <th>SGST</th>
+                    <th>TOTAL GST</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${Object.entries(gstBreakdown).map(([rate, data]) => `
+                    <tr>
+                      <td style="font-weight:bold;">${rate}%</td>
+                      <td class="right">₹${data.taxable.toFixed(2)}</td>
+                      <td class="right">₹${data.cgst.toFixed(2)}</td>
+                      <td class="right">₹${data.sgst.toFixed(2)}</td>
+                      <td class="right" style="font-weight:bold;">₹${(data.cgst + data.sgst).toFixed(2)}</td>
+                    </tr>
+                  `).join('')}
+                  ${Object.keys(gstBreakdown).length === 0 ? '<tr><td colspan="5">No GST Data</td></tr>' : ''}
+                </tbody>
+              </table>
+            </div>
+
+            <div class="summary-box">
+              <div class="summary-title">Summary</div>
+              <div class="summary-row">
+                <span>Total Items:</span>
+                <span>${validItems.length}</span>
+              </div>
+              <div class="summary-row">
+                <span>Total Quantity:</span>
+                <span>${totals.totalQty}</span>
+              </div>
+              <div class="summary-row">
+                <span>Free Quantity:</span>
+                <span>${totals.totalFree}</span>
+              </div>
+              <div class="summary-row">
+                <span>Taxable Amount:</span>
+                <span>₹${Object.values(gstBreakdown).reduce((s, d) => s + d.taxable, 0).toFixed(2)}</span>
+              </div>
+              <div class="summary-row">
+                <span>Total CGST:</span>
+                <span>₹${totals.cgst.toFixed(2)}</span>
+              </div>
+              <div class="summary-row">
+                <span>Total SGST:</span>
+                <span>₹${totals.sgst.toFixed(2)}</span>
+              </div>
+              <div class="summary-row">
+                <span>Total GST:</span>
+                <span>₹${totals.totalGST.toFixed(2)}</span>
+              </div>
+              <div class="summary-row grand">
+                <span>GRAND TOTAL:</span>
+                <span>₹${Math.round(totals.total).toFixed(2)}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Profit Analysis Section -->
+          <div class="profit-section">
+            <div class="profit-title">Profit Analysis</div>
+            <div class="profit-row">
+              <span>Total MRP Value (if sold at MRP):</span>
+              <span>₹${totals.totalMRPValue.toFixed(2)}</span>
+            </div>
+            <div class="profit-row">
+              <span>Total Purchase Cost:</span>
+              <span>₹${totals.total.toFixed(2)}</span>
+            </div>
+            <div class="profit-row" style="font-weight:bold;font-size:13px;border-top:2px solid #000;padding-top:12px;margin-top:8px;">
+              <span>Potential Profit (if sold at MRP):</span>
+              <span>₹${totals.potentialProfit.toFixed(2)}</span>
+            </div>
+            <div class="profit-row" style="font-size:12px;">
+              <span>Profit Margin:</span>
+              <span>${totals.totalMRPValue > 0 ? ((totals.potentialProfit / totals.totalMRPValue) * 100).toFixed(2) : 0}%</span>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="footer">
+            <p style="font-weight:bold;margin-bottom:8px;">Bank Details: Bank of Baroda | Account No: 33030400000044 | Branch: Haripad | IFSC: BARB0HARIPA</p>
+            <p>This is a computer-generated purchase invoice and does not require a signature.</p>
+            <p style="margin-top:8px;font-style:italic;">Generated on: ${new Date().toLocaleString('en-IN')}</p>
+          </div>
+
+          <!-- Signature Section -->
+          <div class="signature-section">
+            <div class="signature-box">
+              Prepared By
+            </div>
+            <div class="signature-box">
+              Authorized Signatory
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  };
+
+  // Show Bill Preview
+  const showBillPreviewModal = () => {
+    const html = generateBillPreviewHTML();
+    setBillPreviewHTML(html);
+    setShowBillPreview(true);
+  };
+
+  // Print Bill
+  // ✅ IMPROVED: Print Bill WITHOUT Pop-up (Using Hidden Iframe)
+  const printBill = () => {
+    const html = billPreviewHTML || generateBillPreviewHTML();
+    
+    // Create a hidden iframe for printing
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.top = '-10000px';
+    iframe.style.left = '-10000px';
+    iframe.style.width = '297mm'; // A4 landscape width
+    iframe.style.height = '210mm'; // A4 landscape height
+    iframe.style.border = 'none';
+    
+    // Append to body
+    document.body.appendChild(iframe);
+    
+    // Get iframe document
+    const iframeDoc = iframe.contentWindow?.document;
+    if (!iframeDoc) {
+      showToast('❌ Print failed. Please try again.', 'error');
+      document.body.removeChild(iframe);
+      return;
+    }
+    
+    // Write HTML to iframe
+    iframeDoc.open();
+    iframeDoc.write(html);
+    iframeDoc.close();
+    
+    // Wait for content to load, then trigger print
+    setTimeout(() => {
+      try {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+        
+        // Remove iframe after print dialog closes (cleanup after 1 second)
+        setTimeout(() => {
+          if (document.body.contains(iframe)) {
+            document.body.removeChild(iframe);
+          }
+        }, 1000);
+      } catch (error) {
+        console.error('Print error:', error);
+        showToast('❌ Print failed', 'error');
+        document.body.removeChild(iframe);
+      }
+    }, 500);
+  };
+
+  // ✅ IMPROVED: Save to PDF (Same as Print - Browser has built-in "Save as PDF")
+  const saveToPDF = () => {
+    printBill();
+    showToast('💡 Tip: Select "Save as PDF" in the print dialog', 'success');
+  };
+
+  
+  // ============ CONTINUATION FROM PART 1 ============
+
+  // COMPLETE INVENTORY MAPPING - Save Purchase Invoice
+  const savePurchase = async () => {
+    if (!invoiceNo.trim()) {
+      showToast('Invoice number is required', 'error');
+      return;
+    }
+
+    const validItems = items.filter(item => item.productName.trim() && item.qty > 0);
+    if (validItems.length === 0) {
+      showToast('Add at least one product with quantity', 'error');
+      return;
+    }
+
+    try {
+      // Prepare purchase record
+      const record: Omit<PurchaseInvoiceRecord, 'id'> = {
+        invoiceNo,
+        header: {
+          invoiceDate,
+          dueDate: dueDate || invoiceDate,
+          orderDate: orderDate || invoiceDate,
+          lrNo: lrNo || '',
+          lrDate: lrDate || '',
+          cases: Number(cases) || 0,
+          transport: transport || '',
+        },
+        party: {
+          name: partyName || 'N/A',
+          address: partyAddress || '',
+          phone: partyPhone || '',
+          gstin: partyGSTIN || '',
+          state: partyState || 'Kerala',
+          stateCode: partyStateCode || '32',
+        },
+        items: validItems,
+        totals: {
+          totalQty: totals.totalQty,
+          totalFree: totals.totalFree,
+          scheme: totals.scheme,
+          discount: totals.discount,
+          sgst: totals.sgst,
+          cgst: totals.cgst,
+          totalGST: totals.totalGST,
+          total: totals.total,
+        },
+        createdAt: new Date().toISOString(),
+      };
+
+      // Save to purchase DB
+      await savePurchaseInvoice(record);
+
+      // COMPLETE INVENTORY MAPPING - Update inventory for each item
+      if (window.inventory) {
+        for (const item of validItems) {
+          // Generate item code if not existing
+          const itemCode = item.productName
+            .toUpperCase()
+            .replace(/[^A-Z0-9]/g, '_')
+            .substring(0, 20) + '_' + Math.random().toString(36).substr(2, 6).toUpperCase();
+
+          // Check if product with same name and batch exists
+          const existingProduct = allProducts.find(
+            p =>
+              p.itemName.toLowerCase().trim() === item.productName.toLowerCase().trim() &&
+              p.batch.toLowerCase().trim() === item.batch.toLowerCase().trim()
+          );
+
+          if (existingProduct) {
+            // Product exists - INCREMENT stock quantity
+            console.log(`Updating existing product: ${existingProduct.itemName} - Batch: ${existingProduct.batch}`);
+            
+            if (window.inventory.incrementStockByCodeBatch) {
+              await window.inventory.incrementStockByCodeBatch(
+                existingProduct.itemCode,
+                existingProduct.batch,
+                item.qty + item.free
+              );
+              console.log(`✅ Stock incremented by ${item.qty + item.free} units`);
+            }
+
+            // Also update OTHER fields (MRP, purchase price, expiry, etc.)
+            if (window.inventory.addOrUpdate) {
+              await window.inventory.addOrUpdate({
+                itemCode: existingProduct.itemCode,
+                itemName: item.productName,
+                batch: item.batch,
+                expiryDate: item.exp || existingProduct.expiryDate,
+                mrp: item.mrp || existingProduct.mrp,
+                purchasePrice: item.rate,
+                stockQuantity: existingProduct.stockQuantity + item.qty + item.free,
+                cgstRate: item.cgst,
+                sgstRate: item.sgst,
+                hsnCode: item.hsn || existingProduct.hsnCode,
+                manufacturer: item.mfr || existingProduct.manufacturer,
+                packSize: item.pack || existingProduct.packSize,
+                sellingPrice: item.mrp || existingProduct.mrp, // Map to selling price
+                category: existingProduct.category || 'General',
+                reorderLevel: existingProduct.reorderLevel || 10,
+                location: existingProduct.location || 'Store',
+                barcode: existingProduct.barcode || '',
+                description: existingProduct.description || '',
+                supplier: partyName || existingProduct.supplier || '',
+              });
+            }
+          } else {
+            // NEW PRODUCT - ADD to inventory with COMPLETE MAPPING
+            console.log(`Adding new product: ${item.productName} - Batch: ${item.batch}`);
+            
+            if (window.inventory.addOrUpdate) {
+              await window.inventory.addOrUpdate({
+                // CORE FIELDS - MAPPED FROM PURCHASE
+                itemCode: itemCode,
+                itemName: item.productName,
+                batch: item.batch,
+                expiryDate: item.exp || '',
+                mrp: item.mrp,
+                purchasePrice: item.rate,
+                sellingPrice: item.mrp, // Assume selling price = MRP initially
+                stockQuantity: item.qty + item.free,
+                cgstRate: item.cgst,
+                sgstRate: item.sgst,
+                hsnCode: item.hsn || '',
+                manufacturer: item.mfr || '',
+                packSize: item.pack || 1,
+                
+                // ADDITIONAL INVENTORY FIELDS - WITH DEFAULTS
+                category: 'General', // Default category
+                reorderLevel: 10, // Default reorder level
+                location: 'Store', // Default storage location
+                barcode: '', // Can be added later
+                description: item.productName, // Use product name as description
+                supplier: partyName || '', // Map from supplier name
+                
+                // TIMESTAMPS
+                createdAt: new Date().toISOString(),
+                lastUpdated: new Date().toISOString(),
+                
+                // PRICING INFO
+                costPrice: item.rate,
+                profit: item.mrp - item.rate,
+                profitMargin: item.mrp > 0 ? ((item.mrp - item.rate) / item.mrp * 100).toFixed(2) : '0',
+                
+                // INVENTORY TRACKING
+                initialStock: item.qty + item.free,
+                currentStock: item.qty + item.free,
+                soldQuantity: 0,
+                returnedQuantity: 0,
+                
+                // STATUS
+                status: 'Active',
+                isExpired: false,
+                lowStock: (item.qty + item.free) <= 10,
+              });
+              
+              console.log(`✅ New product added with ${item.qty + item.free} units`);
+            }
+          }
+        }
+        
+        // Reload products after update
+        const updatedProducts = await window.inventory.getAll();
+        const formatted = updatedProducts.map((p: any) => ({
+          itemCode: p.itemCode || '',
+          itemName: p.itemName || '',
+          batch: p.batch || '',
+          expiryDate: p.expiryDate || '',
+          mrp: Number(p.mrp || 0),
+          stockQuantity: Number(p.stockQuantity || 0),
+          cgstRate: Number(p.cgstRate || 0),
+          sgstRate: Number(p.sgstRate || 0),
+          hsnCode: p.hsnCode || '',
+          manufacturer: p.manufacturer || '',
+          packSize: Number(p.packSize || 1),
+          purchasePrice: Number(p.purchasePrice || 0),
+        }));
+        setAllProducts(formatted);
+      }
+
+      showToast('✅ Purchase invoice saved & inventory updated successfully!');
+
+      // Reset form
+      setInvoiceNo('');
+      setPartyName('');
+      setPartyAddress('');
+      setPartyPhone('');
+      setPartyGSTIN('');
+      setDueDate('');
+      setOrderDate('');
+      setLrNo('');
+      setLrDate('');
+      setCases('');
+      setTransport('');
+      setItems([
+        {
+          id: generateId(),
+          slNo: 1,
+          qty: 0,
+          free: 0,
+          mfr: '',
+          pack: 1,
+          productName: '',
+          batch: '',
+          exp: '',
+          hsn: '',
+          mrp: 0,
+          rate: 0,
+          dis: 0,
+          sgst: 0,
+          sgstValue: 0,
+          cgst: 0,
+          cgstValue: 0,
+          value: 0,
+        },
+      ]);
+    } catch (error) {
+      console.error('Failed to save purchase:', error);
+      showToast('❌ Failed to save purchase invoice', 'error');
+    }
+  };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        savePurchase();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+        e.preventDefault();
+        printBill();
+      }
+      if (e.key === 'Escape') {
+        setShowProductSearch(false);
+        setShowBillPreview(false);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [items, invoiceNo, partyName]);
+
+  return (
+    <div className="w-full h-full flex flex-col bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
+      {/* Toast */}
+      {toast.show && (
+        <div
+          className={`fixed top-6 right-6 z-[200] px-6 py-4 rounded-xl shadow-2xl ${
+            toast.type === 'success'
+              ? 'bg-gradient-to-r from-emerald-500 to-green-600'
+              : 'bg-gradient-to-r from-rose-500 to-red-600'
+          } text-white animate-slideInRight`}
+        >
+          <div className="flex items-center space-x-3">
+            <div className="text-2xl">{toast.type === 'success' ? '✅' : '❌'}</div>
+            <div className="font-semibold">{toast.message}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <div className="px-6 py-4 bg-gradient-to-r from-slate-800 via-slate-900 to-indigo-900 text-white shadow-2xl">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-4">
+            <div className="bg-white/10 p-3 rounded-xl">
+              <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"
+                />
+              </svg>
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold">Purchase Invoice Entry</h1>
+              <p className="text-sm text-white/70 mt-0.5">Ultra-widescreen Excel interface with complete inventory mapping</p>
+            </div>
+          </div>
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={showBillPreviewModal}
+              className="px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 rounded-lg text-sm font-bold shadow-lg transition-all"
+            >
+              👁️ Preview Bill
+            </button>
+            <button
+              onClick={printBill}
+              className="px-5 py-2.5 bg-gradient-to-r from-purple-500 to-violet-600 hover:from-purple-600 hover:to-violet-700 rounded-lg text-sm font-bold shadow-lg transition-all"
+            >
+              🖨️ Print
+            </button>
+            <button
+              onClick={saveToPDF}
+              className="px-5 py-2.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 rounded-lg text-sm font-bold shadow-lg transition-all"
+            >
+              📄 Save PDF
+            </button>
+            <button
+              onClick={savePurchase}
+              className="px-6 py-2.5 bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-600 hover:to-green-700 rounded-lg text-sm font-bold shadow-lg transition-all"
+            >
+              💾 Save Purchase
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Header Form */}
+      <div className="px-6 py-5 bg-white border-b shadow-sm">
+        <div className="grid grid-cols-12 gap-5">
+          {/* Company Info */}
+          <div className="col-span-4 space-y-3 border-r-2 border-indigo-100 pr-5">
+            <div className="bg-gradient-to-br from-indigo-50 to-blue-100 p-4 rounded-xl border-2 border-indigo-200">
+              <div className="text-xl font-bold text-indigo-900">PENCOS MEDICALS</div>
+              <div className="text-sm text-slate-600 mt-1">MELEPANDIYIL BUILDING</div>
+              <div className="text-sm text-slate-600">CHENGANNUR, KERALA-690514</div>
+              <div className="text-sm text-slate-600 mt-1">Ph: 9497370571, 9447207537</div>
+              <div className="text-sm font-semibold text-indigo-700 mt-2">GSTIN: 32AAXFM5083E1Z1</div>
+            </div>
+
+            {/* Supplier Details */}
+            <div className="space-y-2">
+              <div className="text-sm font-bold text-slate-700 mb-2 flex items-center space-x-2">
+                <span>📋 SUPPLIER DETAILS</span>
+                <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Optional</span>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Supplier Name</label>
                 <input
-                  type="number"
-                  min={1}
-                  value={qty}
-                  onChange={e => setQty(Math.max(1, Number(e.target.value || 1)))}
-                  className="w-20 px-2 py-1 text-sm border rounded"
+                  value={partyName}
+                  onChange={e => setPartyName(e.target.value)}
+                  placeholder="Supplier name..."
+                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Address</label>
+                <input
+                  value={partyAddress}
+                  onChange={e => setPartyAddress(e.target.value)}
+                  placeholder="Address..."
+                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1.5">Phone</label>
+                  <input
+                    value={partyPhone}
+                    onChange={e => setPartyPhone(e.target.value)}
+                    placeholder="Phone..."
+                    className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1.5">GSTIN</label>
+                  <input
+                    value={partyGSTIN}
+                    onChange={e => setPartyGSTIN(e.target.value)}
+                    placeholder="GSTIN..."
+                    className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Invoice Details */}
+          <div className="col-span-4 space-y-3 border-r-2 border-indigo-100 pr-5">
+            <div className="text-sm font-bold text-slate-700 mb-3">📄 INVOICE DETAILS</div>
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                Invoice No <span className="text-red-500">*</span>
+              </label>
+              <input
+                value={invoiceNo}
+                onChange={e => setInvoiceNo(e.target.value)}
+                placeholder="Enter invoice number..."
+                className="w-full px-4 py-2.5 border-2 border-indigo-300 rounded-lg text-base font-bold focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Invoice Date</label>
+                <input
+                  type="date"
+                  value={invoiceDate}
+                  onChange={e => setInvoiceDate(e.target.value)}
+                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Due Date</label>
+                <input
+                  type="date"
+                  value={dueDate}
+                  onChange={e => setDueDate(e.target.value)}
+                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
                 />
               </div>
             </div>
-            <div className="max-h-[380px] overflow-auto">
-              <table className="w-full text-xs">
-                <thead className="bg-slate-100 sticky top-0">
-                  <tr>
-                    <th className="px-2 py-2 text-left">Batch</th>
-                    <th className="px-2 py-2 text-center">Expiry</th>
-                    <th className="px-2 py-2 text-right">MRP</th>
-                    <th className="px-2 py-2 text-right">Rate</th>
-                    <th className="px-2 py-2 text-center">CGST%</th>
-                    <th className="px-2 py-2 text-center">SGST%</th>
-                    <th className="px-2 py-2 text-center">Pack</th>
-                    <th className="px-2 py-2 text-center">Stock</th>
-                    <th className="px-2 py-2 text-center">Select</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {batchRows.map((b, i) => (
-                    <tr key={`${b.id}-${i}`} className="hover:bg-blue-50">
-                      <td className="px-2 py-1.5 font-mono">{b.batch}</td>
-                      <td className="px-2 py-1.5 text-center text-purple-700 font-semibold">{b.expiry}</td>
-                      <td className="px-2 py-1.5 text-right">₹{b.mrpN.toFixed(2)}</td>
-                      <td className="px-2 py-1.5 text-right font-bold text-green-700">₹{b.rateN.toFixed(2)}</td>
-                      <td className="px-2 py-1.5 text-center">{b.cgstN}%</td>
-                      <td className="px-2 py-1.5 text-center">{b.sgstN}%</td>
-                      <td className="px-2 py-1.5 text-center">{b.packN}</td>
-                      <td className="px-2 py-1.5 text-center">{b.stockN}</td>
-                      <td className="px-2 py-1.5 text-center">
-                        <button
-                          className="px-2 py-1 text-xs bg-primary text-white rounded"
-                          onClick={() =>
-                            onSelect({
-                              product: b,
-                              batch: b.batch || '',
-                              expiryDate: b.expiry || '',
-                              mrp: b.mrpN,
-                              rate: b.rateN,
-                              cgstPercent: b.cgstN,
-                              sgstPercent: b.sgstN,
-                              pack: b.packN,
-                              quantity: qty
-                            })
-                          }
-                        >
-                          Use
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {batchRows.length === 0 && (
-                    <tr>
-                      <td className="px-2 py-3 text-center text-slate-500" colSpan={9}>
-                        {activeCode ? 'No batches found' : 'Pick an Item Code to see batches'}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-1.5">Order Date</label>
+              <input
+                type="date"
+                value={orderDate}
+                onChange={e => setOrderDate(e.target.value)}
+                className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
+              />
             </div>
           </div>
-        </div>
 
-        <div className="px-4 py-2 bg-slate-50 border-t flex justify-end">
-          <button onClick={onClose} className="px-3 py-1.5 text-sm bg-gray-200 rounded hover:bg-gray-300">Close</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ---------------- Main Sales Invoice ----------------
-
-export default function SalesInvoice({ onClose }: { onClose: () => void }) {
-  const [invoiceNo, setInvoiceNo] = useState('');
-  const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
-  const [saleType, setSaleType] = useState('B2C');
-  const [patientName, setPatientName] = useState('');
-  const [contactNo, setContactNo] = useState('');
-  const [doctorName, setDoctorName] = useState('');
-  const [paymentMode, setPaymentMode] = useState('Cash');
-
-  const [items, setItems] = useState<InvoiceItem[]>([{
-    no: 1, itemCode: '', itemName: '', batch: '', expiryDate: '', quantity: 0, pack: 1,
-    mrp: 0, rate: 0, grossAmt: 0, cgstPercent: 9, cgstAmt: 0, sgstPercent: 9, sgstAmt: 0, total: 0
-  }]);
-
-  const [inv, setInv] = useState<InvProduct[]>([]);
-  const [openSearch, setOpenSearch] = useState(false);
-  const [searchRow, setSearchRow] = useState<number | null>(null);
-  const [searchPrefix, setSearchPrefix] = useState('');
-
-  const [showPreview, setShowPreview] = useState(false);
-  const [previewHTML, setPreviewHTML] = useState('');
-
-  const inputRefs = useRef<{ [k: string]: HTMLInputElement | null }>({});
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const products = await getAllProducts();
-        const normalized: InvProduct[] = (products || []).map((p: any) => ({
-          id: String(p.id ?? `${p.itemCode}-${p.batch ?? ''}`),
-          itemCode: String(p.itemCode ?? ''),
-          itemName: String(p.itemName ?? ''),
-          batch: p.batch ?? '',
-          expiryDate: p.expiryDate ?? p.expiry ?? '',
-          pack: Number(p.pack ?? 1),
-          mrp: Number(p.mrp ?? p.mrpStr ?? 0),
-          sellingPrice: Number(p.sellingPriceTab ?? p.sRateStrip ?? p.sellingPrice ?? 0),
-          cgstRate: Number(p.cgstRate ?? p.cgstPercent ?? 0),
-          sgstRate: Number(p.sgstRate ?? p.sgstPercent ?? 0),
-          stockQuantity: Number(p.stockQuantity ?? 0),
-        }));
-        setInv(normalized);
-      } catch (e) {
-        console.error('Failed to load inventory', e);
-      }
-    })();
-    setInvoiceNo(`SI${Date.now().toString().slice(-6)}`);
-  }, []);
-
-  const numberToWords = (num: number): string => {
-    const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
-    const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-    const teens = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
-    if (num === 0) return 'Zero';
-    if (num < 10) return ones[num];
-    if (num < 20) return teens[num - 10];
-    if (num < 100) return `${tens[Math.floor(num / 10)]} ${ones[num % 10]}`.trim();
-    if (num < 1000) return `${ones[Math.floor(num / 100)]} Hundred ${numberToWords(num % 100)}`.trim();
-    if (num < 100000) return `${numberToWords(Math.floor(num / 1000))} Thousand ${numberToWords(num % 1000)}`.trim();
-    if (num < 10000000) return `${numberToWords(Math.floor(num / 100000))} Lakh ${numberToWords(num % 100000)}`.trim();
-    return `${numberToWords(Math.floor(num / 10000000))} Crore ${numberToWords(num % 10000000)}`.trim();
-  };
-
-  const calcRow = (r: InvoiceItem): InvoiceItem => {
-    const gross = (r.quantity || 0) * (r.rate || 0);
-    const cgstAmt = (gross * (r.cgstPercent || 0)) / 100;
-    const sgstAmt = (gross * (r.sgstPercent || 0)) / 100;
-    const total = gross + cgstAmt + sgstAmt;
-    return {
-      ...r,
-      grossAmt: Number(gross.toFixed(2)),
-      cgstAmt: Number(cgstAmt.toFixed(2)),
-      sgstAmt: Number(sgstAmt.toFixed(2)),
-      total: Number(total.toFixed(2)),
-    };
-  };
-
-  const setRow = (idx: number, updater: (row: InvoiceItem) => InvoiceItem) => {
-    setItems(prev => {
-      const next = [...prev];
-      next[idx] = calcRow(updater(next[idx]));
-      return next;
-    });
-  };
-
-  // Open search when first letter entered in Item Code
-  const handleItemCodeChange = (index: number, value: string) => {
-    setRow(index, r => ({ ...r, itemCode: value }));
-    if (value && value.length === 1) {
-      setSearchRow(index);
-      setSearchPrefix(value);
-      setOpenSearch(true);
-    }
-  };
-
-  const applyPickedToRow = (idx: number, picked: PickedRow) => {
-    const p = picked.product;
-    setRow(idx, r => ({
-      ...r,
-      itemCode: p.itemCode || r.itemCode,
-      itemName: p.itemName || r.itemName,
-      batch: picked.batch || '',
-      expiryDate: picked.expiryDate || '',
-      pack: picked.pack || 1,
-      mrp: picked.mrp || 0,
-      rate: picked.rate || 0,
-      cgstPercent: picked.cgstPercent ?? 0,
-      sgstPercent: picked.sgstPercent ?? 0,
-      quantity: picked.quantity || 1,
-    }));
-    setTimeout(() => inputRefs.current[`${idx}-quantity`]?.focus(), 50);
-  };
-
-  const columns = ['itemCode','itemName','batch','expiryDate','quantity','pack','mrp','rate','cgstPercent','sgstPercent'] as const;
-
-  const handleKeyDown = (e: React.KeyboardEvent, rowIdx: number, colIdx: number) => {
-    if (e.key === 'F3') {
-      e.preventDefault();
-      setSearchRow(rowIdx);
-      setSearchPrefix('');
-      setOpenSearch(true);
-      return;
-    }
-    if (e.key === 'Tab' || e.key === 'ArrowRight') {
-      e.preventDefault();
-      const nextCol = Math.min(colIdx + 1, columns.length - 1);
-      inputRefs.current[`${rowIdx}-${columns[nextCol]}`]?.focus();
-    } else if (e.key === 'ArrowLeft') {
-      e.preventDefault();
-      const prevCol = Math.max(colIdx - 1, 0);
-      inputRefs.current[`${rowIdx}-${columns[prevCol]}`]?.focus();
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      if (rowIdx < items.length - 1) inputRefs.current[`${rowIdx + 1}-${columns[colIdx]}`]?.focus();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (rowIdx > 0) inputRefs.current[`${rowIdx - 1}-${columns[colIdx]}`]?.focus();
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      if (rowIdx === items.length - 1) {
-        addRow();
-        setTimeout(() => inputRefs.current[`${items.length}-${columns[0]}`]?.focus(), 30);
-      } else {
-        inputRefs.current[`${rowIdx + 1}-${columns[colIdx]}`]?.focus();
-      }
-    }
-  };
-
-  const addRow = () => {
-    setItems(prev => [...prev, {
-      no: prev.length + 1, itemCode: '', itemName: '', batch: '', expiryDate: '',
-      quantity: 0, pack: 1, mrp: 0, rate: 0, grossAmt: 0,
-      cgstPercent: 9, cgstAmt: 0, sgstPercent: 9, sgstAmt: 0, total: 0
-    }]);
-  };
-
-  const removeRow = (index: number) => {
-    setItems(prev => {
-      if (prev.length <= 1) return prev;
-      return prev.filter((_, i) => i !== index).map((r, i) => ({ ...r, no: i + 1 }));
-    });
-  };
-
-  const totals = useMemo(() => {
-    const totalQty = items.reduce((s, r) => s + (r.quantity || 0), 0);
-    const grossTotal = items.reduce((s, r) => s + (r.grossAmt || 0), 0);
-    const totalCgst = items.reduce((s, r) => s + (r.cgstAmt || 0), 0);
-    const totalSgst = items.reduce((s, r) => s + (r.sgstAmt || 0), 0);
-    const billAmount = items.reduce((s, r) => s + (r.total || 0), 0);
-    return {
-      totalQty,
-      grossTotal: Number(grossTotal.toFixed(2)),
-      totalCgst: Number(totalCgst.toFixed(2)),
-      totalSgst: Number(totalSgst.toFixed(2)),
-      totalTax: Number((totalCgst + totalSgst).toFixed(2)),
-      billAmount: Number(billAmount.toFixed(2)),
-      roundOff: Number((Math.round(billAmount) - billAmount).toFixed(2)),
-      finalAmount: Math.round(billAmount),
-    };
-  }, [items]);
-
-  const saveToLocalDB = async (invoiceData: any) =>
-    new Promise((resolve, reject) => {
-      const req = indexedDB.open('SalesInvoiceDB', 1);
-      req.onerror = () => reject(req.error);
-      req.onupgradeneeded = (ev) => {
-        const db = (ev.target as IDBOpenDBRequest).result;
-        if (!db.objectStoreNames.contains('invoices')) {
-          db.createObjectStore('invoices', { keyPath: 'id', autoIncrement: true });
-        }
-      };
-      req.onsuccess = () => {
-        const db = req.result;
-        const tx = db.transaction(['invoices'], 'readwrite');
-        const st = tx.objectStore('invoices');
-        const add = st.add(invoiceData);
-        add.onsuccess = () => resolve(add.result);
-        add.onerror = () => reject(add.error);
-      };
-    });
-
-  const generateInvoiceHTML = (invoiceData: any) => {
-    const t = invoiceData.totals;
-    return `
-<!doctype html><html><head><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${invoiceData.invoiceNo}</title>
-<style>
-@page{size:A4 landscape;margin:10mm}
-body{font-family:Arial,sans-serif;font-size:11px;margin:0;padding:10mm;color:#000}
-.table{width:100%;border-collapse:collapse}
-.table th{background:#111;color:#fff;border:2px solid #000;padding:6px 5px}
-.table td{border:1px solid #000;padding:5px;text-align:center}
-.left{text-align:left} .small{font-size:10px}
-.section{margin:8px 0} .bold{font-weight:700}
-.totals{border:2px solid #000;padding:8px}
-.row{display:flex;justify-content:space-between;margin:4px 0}
-</style>
-</head><body>
-<div class="section" style="text-align:center;border-bottom:2px solid #000;padding-bottom:6px">
-  <div class="bold" style="font-size:18px">PENCOS MEDICALS</div>
-  <div class="small">Kerala, India | GSTIN: 32XXXXXXXXX1ZX</div>
-</div>
-
-<div class="section" style="display:flex;justify-content:space-between">
-  <div>
-    <div class="small"><span class="bold">Invoice No:</span> ${invoiceData.invoiceNo}</div>
-    <div class="small"><span class="bold">Date:</span> ${new Date(inventoryDate).toLocaleDateString('en-IN')}</div>
-    <div class="small"><span class="bold">Type:</span> ${invoiceData.saleType}</div>
-    <div class="small"><span class="bold">Payment:</span> ${invoiceData.paymentMode}</div>
-  </div>
-  <div>
-    <div class="small"><span class="bold">Customer:</span> ${invoiceData.patientName || '-'}</div>
-    <div class="small"><span class="bold">Contact:</span> ${invoiceData.contactNo || '-'}</div>
-    <div class="small"><span class="bold">Doctor:</span> ${invoiceData.doctorName || '-'}</div>
-  </div>
-</div>
-
-<table class="table">
-<thead>
-<tr>
-<th>No</th><th class="left">Item Code</th><th class="left">Item Name</th><th>Batch</th><th>Expiry</th><th>Qty</th>
-<th>Pack</th><th>MRP</th><th>Rate</th><th>Gross</th><th>CGST%</th><th>CGST</th><th>SGST%</th><th>SGST</th><th>Total</th>
-</tr>
-</thead>
-<tbody>
-${invoiceData.items.map((r:any)=>`
-<tr>
-<td>${r.no}</td><td class="left">${r.itemCode}</td><td class="left bold">${r.itemName}</td>
-<td>${r.batch||'-'}</td><td>${r.expiryDate||'-'}</td><td class="bold">${r.quantity}</td>
-<td>${r.pack}</td><td>₹${(r.mrp||0).toFixed(2)}</td><td class="bold">₹${(r.rate||0).toFixed(2)}</td>
-<td class="bold">₹${(r.grossAmt||0).toFixed(2)}</td><td>${r.cgstPercent}</td><td>₹${(r.cgstAmt||0).toFixed(2)}</td>
-<td>${r.sgstPercent}</td><td>₹${(r.sgstAmt||0).toFixed(2)}</td><td class="bold">₹${(r.total||0).toFixed(2)}</td>
-</tr>`).join('')}
-</tbody>
-</table>
-
-<div class="section" style="display:flex;gap:16px">
-  <div style="flex:1">
-    <div class="small"><span class="bold">Amount in words:</span> ${t.finalAmount} — ${'${words}'} </div>
-  </div>
-  <div class="totals" style="min-width:320px">
-    <div class="row"><span>Total Qty</span><span class="bold">${t.totalQty}</span></div>
-    <div class="row"><span>Gross Total</span><span>₹${t.grossTotal.toFixed(2)}</span></div>
-    <div class="row"><span>CGST</span><span>₹${t.totalCgst.toFixed(2)}</span></div>
-    <div class="row"><span>SGST</span><span>₹${t.totalSgst.toFixed(2)}</span></div>
-    <div class="row"><span>Total Tax</span><span class="bold">₹${t.totalTax.toFixed(2)}</span></div>
-    <div class="row"><span>Round Off</span><span>₹${t.roundOff.toFixed(2)}</span></div>
-    <div class="row bold" style="font-size:14px;border-top:2px solid #000;padding-top:6px">
-      <span>Bill Amount</span><span>₹${t.finalAmount.toFixed(2)}</span>
-    </div>
-  </div>
-</div>
-
-<script>
-  function numberToWords(num){
-    const ones=['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine'];
-    const tens=['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
-    const teens=['Ten','Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'];
-    function ntw(n){if(n===0)return'Zero';if(n<10)return ones[n];if(n<20)return teens[n-10];
-      if(n<100)return (tens[Math.floor(n/10)]+' '+ones[n%10]).trim();
-      if(n<1000)return (ones[Math.floor(n/100)]+' Hundred '+ntw(n%100)).trim();
-      if(n<100000)return (ntw(Math.floor(n/1000))+' Thousand '+ntw(n%1000)).trim();
-      if(n<10000000)return (ntw(Math.floor(n/100000))+' Lakh '+ntw(n%100000)).trim();
-      return (ntw(Math.floor(n/10000000))+' Crore '+ntw(n%10000000)).trim();}
-    return ntw(num);
-  }
-  const words = numberToWords(${t.finalAmount});
-  document.body.innerHTML = document.body.innerHTML.replace('${'+'${words}'+'}', words + ' Rupees Only');
-</script>
-
-</body></html>`;
-  };
-
-  const handlePreview = () => {
-    if (!patientName || items.every(i => !i.itemName)) {
-      alert('Please enter customer and at least one item');
-      return;
-    }
-    const data = {
-      invoiceNo, invoiceDate, saleType, patientName, contactNo, doctorName, paymentMode,
-      items: items.filter(i => i.itemName),
-      totals,
-      createdAt: new Date().toISOString()
-    };
-    setPreviewHTML(generateInvoiceHTML(data));
-    setShowPreview(true);
-  };
-
-  const handlePrint = () => {
-    const iframe = document.getElementById('print-iframe') as HTMLIFrameElement;
-    iframe?.contentWindow?.print();
-  };
-
-  const handleSave = async () => {
-    if (!patientName || items.every(i => !i.itemName)) {
-      alert('Please enter customer and at least one item');
-      return;
-    }
-    const data = {
-      invoiceNo, invoiceDate, saleType, patientName, contactNo, doctorName, paymentMode,
-      items: items.filter(i => i.itemName),
-      totals,
-      createdAt: new Date().toISOString()
-    };
-    await saveToLocalDB(data);
-    setPreviewHTML(generateInvoiceHTML(data));
-    setShowPreview(true);
-    setTimeout(handlePrint, 400);
-  };
-
-  return (
-    <>
-      {/* Screen */}
-      <div className="fixed inset-0 bg-slate-900/95 z-50 overflow-hidden">
-        <div className="h-screen flex flex-col">
-          {/* Header */}
-          <div className="bg-gradient-to-r from-primary to-indigo-600 text-white px-4 py-2 flex justify-between items-center shadow-lg">
-            <div className="flex items-center space-x-3">
-              <div className="p-1.5 bg-white/10 rounded-lg">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
+          {/* Transport Details */}
+          <div className="col-span-4 space-y-3">
+            <div className="text-sm font-bold text-slate-700 mb-3">🚚 TRANSPORT DETAILS</div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">L.R. No</label>
+                <input
+                  value={lrNo}
+                  onChange={e => setLrNo(e.target.value)}
+                  placeholder="LR number..."
+                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
+                />
               </div>
               <div>
-                <h1 className="text-base font-bold">Sales Invoice</h1>
-                <p className="text-[9px] text-white/70">Type first letter in Item Code to open search • F3 to search</p>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">L.R. Date</label>
+                <input
+                  type="date"
+                  value={lrDate}
+                  onChange={e => setLrDate(e.target.value)}
+                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
+                />
               </div>
             </div>
-            <button onClick={onClose} className="p-1.5 hover:bg-white/10 rounded-lg transition-all">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-
-          {/* Top form */}
-          <div className="bg-white px-4 py-2 border-b grid grid-cols-7 gap-2">
-            <div>
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Invoice No</label>
-              <input type="text" value={invoiceNo} onChange={e => setInvoiceNo(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
-            </div>
-            <div>
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Date</label>
-              <input type="date" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
-            </div>
-            <div>
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Sale Type</label>
-              <select value={saleType} onChange={e => setSaleType(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded">
-                <option value="B2C">B2C</option>
-                <option value="B2B">B2B</option>
-              </select>
-            </div>
-            <div className="col-span-2">
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Customer</label>
-              <input type="text" value={patientName} onChange={e => setPatientName(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" placeholder="Customer name" />
-            </div>
-            <div>
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Contact</label>
-              <input type="text" value={contactNo} onChange={e => setContactNo(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
-            </div>
-            <div>
-              <label className="block text-[9px] font-bold text-gray-600 mb-0.5">Doctor</label>
-              <input type="text" value={doctorName} onChange={e => setDoctorName(e.target.value)} className="w-full px-2 py-1 text-xs border border-gray-300 rounded" />
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Cases</label>
+                <input
+                  type="number"
+                  value={cases}
+                  onChange={e => setCases(e.target.value === '' ? '' : Number(e.target.value))}
+                  placeholder="Number of cases..."
+                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Transport</label>
+                <input
+                  value={transport}
+                  onChange={e => setTransport(e.target.value)}
+                  placeholder="Transport name..."
+                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
+                />
+              </div>
             </div>
           </div>
+        </div>
+      </div>
 
-          {/* Table */}
-          <div className="flex-1 overflow-auto bg-white">
-            <table className="w-full border-collapse text-[10px]">
-              <thead className="sticky top-0 z-10">
-                <tr className="bg-gradient-to-r from-slate-700 to-slate-600 text-white">
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-10">No</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-28">Item Code</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold text-left min-w-[220px]">Item Name</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-24">Batch</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-20">Expiry</th>
-                  <th className="border border-blue-500 px-2 py-1.5 font-bold w-16 bg-blue-600">Qty</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-16">Pack</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold text-right w-24">MRP</th>
-                  <th className="border border-blue-500 px-2 py-1.5 font-bold text-right w-24 bg-blue-600">Rate</th>
-                  <th className="border border-green-500 px-2 py-1.5 font-bold text-right w-28 bg-green-600">Gross</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-16">CGST%</th>
-                  <th className="border border-green-500 px-2 py-1.5 font-bold text-right w-24 bg-green-600">CGST</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-16">SGST%</th>
-                  <th className="border border-green-500 px-2 py-1.5 font-bold text-right w-24 bg-green-600">SGST</th>
-                  <th className="border border-indigo-500 px-2 py-1.5 font-bold text-right w-28 bg-indigo-600">Total</th>
-                  <th className="border border-slate-500 px-2 py-1.5 font-bold w-10">Del</th>
+      {/* ULTRA-WIDESCREEN EXCEL TABLE - 2600px+ WIDTH */}
+      <div className="flex-1 overflow-auto px-6 py-4">
+        <div className="bg-white rounded-xl shadow-2xl overflow-hidden border-2 border-slate-200">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm border-collapse" style={{ minWidth: '2600px' }}>
+              <thead className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white sticky top-0 z-10">
+                <tr>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '60px'}}>#</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>QTY</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>FREE</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '150px'}}>MFR</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>PACK</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-left font-bold" style={{width: '350px'}}>PRODUCT NAME</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '140px'}}>BATCH</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '120px'}}>EXP</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '120px'}}>HSN</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-right font-bold" style={{width: '140px'}}>M.R.P</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-right font-bold" style={{width: '140px'}}>RATE</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>DIS%</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>SGST%</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-right font-bold" style={{width: '140px'}}>SGST</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>CGST%</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-right font-bold" style={{width: '140px'}}>CGST</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-right font-bold" style={{width: '160px'}}>VALUE</th>
+                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '120px'}}>ACTION</th>
                 </tr>
               </thead>
               <tbody>
-                {items.map((r, index) => (
-                  <tr key={index} className={`${index % 2 === 0 ? 'bg-white' : 'bg-slate-50'} hover:bg-blue-50`}>
-                    <td className="border border-slate-300 px-2 py-0.5 text-center font-bold">{r.no}</td>
-
-                    {/* Item Code */}
-                    <td className="border border-slate-300 p-0">
+                {items.map((item, idx) => (
+                  <tr
+                    key={item.id}
+                    className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'} hover:bg-indigo-50 transition-colors`}
+                  >
+                    <td className="border border-slate-300 px-4 py-3 text-center font-bold text-slate-700 text-lg">
+                      {item.slNo}
+                    </td>
+                    <td className="border border-slate-300 px-2 py-2">
                       <input
-                        ref={el => (inputRefs.current[`${index}-itemCode`] = el)}
-                        type="text"
-                        value={r.itemCode}
-                        onChange={e => handleItemCodeChange(index, e.target.value)}
-                        onKeyDown={e => handleKeyDown(e, index, 0)}
-                        className="w-full px-2 py-0.5 text-[10px] border-0 focus:ring-2 focus:ring-blue-400 bg-transparent font-mono font-semibold"
-                        placeholder="Code"
+                        type="number"
+                        value={item.qty || ''}
+                        onChange={e => updateItem(item.id, 'qty', Number(e.target.value))}
+                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-lg font-bold focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                        placeholder="0"
                       />
                     </td>
-
-                    {/* Item Name */}
-                    <td className="border border-slate-300 p-0">
+                    <td className="border border-slate-300 px-2 py-2">
                       <input
-                        ref={el => (inputRefs.current[`${index}-itemName`] = el)}
-                        type="text"
-                        value={r.itemName}
-                        onChange={e => setRow(index, row => ({ ...row, itemName: e.target.value }))}
-                        onKeyDown={e => handleKeyDown(e, index, 1)}
-                        className="w-full px-2 py-0.5 text-[10px] border-0 focus:ring-2 focus:ring-blue-400 bg-transparent font-semibold"
-                        placeholder="Item name"
+                        type="number"
+                        value={item.free || ''}
+                        onChange={e => updateItem(item.id, 'free', Number(e.target.value))}
+                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-base focus:ring-2 focus:ring-indigo-500"
+                        placeholder="0"
                       />
                     </td>
-
-                    {/* Batch */}
-                    <td className="border border-slate-300 p-0">
+                    <td className="border border-slate-300 px-2 py-2">
                       <input
-                        ref={el => (inputRefs.current[`${index}-batch`] = el)}
-                        type="text"
-                        value={r.batch}
-                        onChange={e => setRow(index, row => ({ ...row, batch: e.target.value }))}
-                        onKeyDown={e => handleKeyDown(e, index, 2)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center border-0 focus:ring-2 focus:ring-blue-400 bg-transparent font-mono"
+                        value={item.mfr}
+                        onChange={e => updateItem(item.id, 'mfr', e.target.value)}
+                        className="w-full px-4 py-3 border-2 border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+                        placeholder="Manufacturer"
                       />
                     </td>
-
-                    {/* Expiry */}
-                    <td className="border border-slate-300 p-0">
+                    <td className="border border-slate-300 px-2 py-2">
                       <input
-                        ref={el => (inputRefs.current[`${index}-expiryDate`] = el)}
-                        type="text"
-                        value={r.expiryDate}
-                        onChange={e => setRow(index, row => ({ ...row, expiryDate: e.target.value }))}
-                        onKeyDown={e => handleKeyDown(e, index, 3)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center border-0 focus:ring-2 focus:ring-blue-400 bg-transparent"
+                        type="number"
+                        value={item.pack || ''}
+                        onChange={e => updateItem(item.id, 'pack', Number(e.target.value))}
+                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-base focus:ring-2 focus:ring-indigo-500"
+                        placeholder="1"
+                      />
+                    </td>
+                    <td className="border border-slate-300 px-2 py-2">
+                      <div className="flex items-center space-x-2">
+                        <input
+                          value={item.productName}
+                          onChange={e => updateItem(item.id, 'productName', e.target.value)}
+                          className="flex-1 px-4 py-3 border-2 border-slate-300 rounded-lg text-sm font-semibold focus:ring-2 focus:ring-indigo-500"
+                          placeholder="Product name..."
+                        />
+                        <button
+                          onClick={() => openProductSearch(item.id)}
+                          className="px-4 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-bold"
+                          title="Search Product"
+                        >
+                          🔍
+                        </button>
+                      </div>
+                    </td>
+                    <td className="border border-slate-300 px-2 py-2">
+                      <input
+                        value={item.batch}
+                        onChange={e => updateItem(item.id, 'batch', e.target.value)}
+                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg font-mono text-sm font-bold focus:ring-2 focus:ring-indigo-500"
+                        placeholder="Batch"
+                      />
+                    </td>
+                    <td className="border border-slate-300 px-2 py-2">
+                      <input
+                        value={item.exp}
+                        onChange={e => updateItem(item.id, 'exp', e.target.value)}
+                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
                         placeholder="MM/YY"
                       />
                     </td>
-
-                    {/* Qty */}
-                    <td className="border border-blue-300 p-0 bg-blue-50">
+                    <td className="border border-slate-300 px-2 py-2">
                       <input
-                        ref={el => (inputRefs.current[`${index}-quantity`] = el)}
-                        type="number"
-                        value={r.quantity || ''}
-                        onChange={e => setRow(index, row => ({ ...row, quantity: Number(e.target.value || 0) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 4)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center font-bold text-blue-700 border-0 focus:ring-2 focus:ring-blue-500 bg-transparent"
+                        value={item.hsn}
+                        onChange={e => updateItem(item.id, 'hsn', e.target.value)}
+                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+                        placeholder="HSN"
                       />
                     </td>
-
-                    {/* Pack */}
-                    <td className="border border-slate-300 p-0">
+                    <td className="border border-slate-300 px-2 py-2">
                       <input
-                        ref={el => (inputRefs.current[`${index}-pack`] = el)}
-                        type="number"
-                        value={r.pack || ''}
-                        onChange={e => setRow(index, row => ({ ...row, pack: Number(e.target.value || 1) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 5                        )}}
-                        className="w-full px-1 py-0.5 text-[10px] text-center border-0 focus:ring-2 focus:ring-blue-400 bg-transparent"
-                      />
-                    </td>
-
-                    {/* MRP */}
-                    <td className="border border-slate-300 p-0">
-                      <input
-                        ref={el => (inputRefs.current[`${index}-mrp`] = el)}
                         type="number"
                         step="0.01"
-                        value={r.mrp || ''}
-                        onChange={e => setRow(index, row => ({ ...row, mrp: Number(e.target.value || 0) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 6)}
-                        className="w-full px-1 py-0.5 text-[10px] text-right border-0 focus:ring-2 focus:ring-blue-400 bg-transparent"
+                        value={item.mrp || ''}
+                        onChange={e => updateItem(item.id, 'mrp', Number(e.target.value))}
+                        className="w-full px-4 py-3 text-right border-2 border-slate-300 rounded-lg text-lg font-bold focus:ring-2 focus:ring-indigo-500"
+                        placeholder="0.00"
                       />
                     </td>
-
-                    {/* Rate */}
-                    <td className="border border-blue-300 p-0 bg-blue-50">
+                    <td className="border border-slate-300 px-2 py-2">
                       <input
-                        ref={el => (inputRefs.current[`${index}-rate`] = el)}
                         type="number"
                         step="0.01"
-                        value={r.rate || ''}
-                        onChange={e => setRow(index, row => ({ ...row, rate: Number(e.target.value || 0) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 7)}
-                        className="w-full px-1 py-0.5 text-[10px] text-right font-bold text-blue-700 border-0 focus:ring-2 focus:ring-blue-500 bg-transparent"
+                        value={item.rate || ''}
+                        onChange={e => updateItem(item.id, 'rate', Number(e.target.value))}
+                        className="w-full px-4 py-3 text-right border-2 border-indigo-300 rounded-lg text-lg font-bold text-indigo-700 focus:ring-2 focus:ring-indigo-500"
+                        placeholder="0.00"
                       />
                     </td>
-
-                    {/* Gross */}
-                    <td className="border border-green-300 px-2 py-0.5 text-right text-[10px] font-bold bg-green-50 text-green-800">
-                      {r.grossAmt.toFixed(2)}
-                    </td>
-
-                    {/* CGST% */}
-                    <td className="border border-slate-300 p-0">
+                    <td className="border border-slate-300 px-2 py-2">
                       <input
-                        ref={el => (inputRefs.current[`${index}-cgstPercent`] = el)}
                         type="number"
-                        step="0.1"
-                        value={r.cgstPercent || ''}
-                        onChange={e => setRow(index, row => ({ ...row, cgstPercent: Number(e.target.value || 0) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 8)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center border-0 focus:ring-2 focus:ring-blue-400 bg-transparent"
+                        step="0.01"
+                        value={item.dis || ''}
+                        onChange={e => updateItem(item.id, 'dis', Number(e.target.value))}
+                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-base focus:ring-2 focus:ring-amber-500"
+                        placeholder="0"
                       />
                     </td>
-
-                    {/* CGST Amt */}
-                    <td className="border border-green-300 px-2 py-0.5 text-right text-[10px] font-semibold bg-green-50 text-green-800">
-                      {r.cgstAmt.toFixed(2)}
-                    </td>
-
-                    {/* SGST% */}
-                    <td className="border border-slate-300 p-0">
+                    <td className="border border-slate-300 px-2 py-2">
                       <input
-                        ref={el => (inputRefs.current[`${index}-sgstPercent`] = el)}
                         type="number"
-                        step="0.1"
-                        value={r.sgstPercent || ''}
-                        onChange={e => setRow(index, row => ({ ...row, sgstPercent: Number(e.target.value || 0) }))}
-                        onKeyDown={e => handleKeyDown(e, index, 9)}
-                        className="w-full px-1 py-0.5 text-[10px] text-center border-0 focus:ring-2 focus:ring-blue-400 bg-transparent"
+                        step="0.01"
+                        value={item.sgst || ''}
+                        onChange={e => updateItem(item.id, 'sgst', Number(e.target.value))}
+                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-base focus:ring-2 focus:ring-indigo-500"
+                        placeholder="0"
                       />
                     </td>
-
-                    {/* SGST Amt */}
-                    <td className="border border-green-300 px-2 py-0.5 text-right text-[10px] font-semibold bg-green-50 text-green-800">
-                      {r.sgstAmt.toFixed(2)}
+                    <td className="border border-slate-300 px-4 py-3 text-right font-bold text-amber-700 text-lg">
+                      ₹{item.sgstValue.toFixed(2)}
                     </td>
-
-                    {/* Total */}
-                    <td className="border border-indigo-300 px-2 py-0.5 text-right text-[11px] font-bold bg-indigo-50 text-indigo-900">
-                      ₹{r.total.toFixed(2)}
+                    <td className="border border-slate-300 px-2 py-2">
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={item.cgst || ''}
+                        onChange={e => updateItem(item.id, 'cgst', Number(e.target.value))}
+                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-base focus:ring-2 focus:ring-indigo-500"
+                        placeholder="0"
+                      />
                     </td>
-
-                    {/* Delete */}
-                    <td className="border border-slate-300 p-0 text-center">
+                    <td className="border border-slate-300 px-4 py-3 text-right font-bold text-amber-700 text-lg">
+                      ₹{item.cgstValue.toFixed(2)}
+                    </td>
+                    <td className="border border-slate-300 px-4 py-3 text-right font-bold text-indigo-700 text-xl">
+                      ₹{item.value.toFixed(2)}
+                    </td>
+                    <td className="border border-slate-300 px-2 py-2 text-center">
                       <button
-                        onClick={() => removeRow(index)}
-                        className="p-1 text-red-600 hover:bg-red-100 rounded transition-all"
+                        onClick={() => deleteRow(item.id)}
+                        className="px-4 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm font-bold"
+                        title="Delete Row"
                       >
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
+                        🗑️ Delete
                       </button>
                     </td>
                   </tr>
                 ))}
               </tbody>
+              <tfoot className="bg-gradient-to-r from-slate-100 to-slate-200 sticky bottom-0">
+                <tr className="font-bold">
+                  <td className="border border-slate-400 px-4 py-4 text-center" colSpan={1}>
+                    <button
+                      onClick={addRow}
+                      className="px-6 py-3 bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-600 hover:to-green-700 text-white rounded-lg text-base font-bold shadow-lg"
+                    >
+                      ➕ Add Row
+                    </button>
+                  </td>
+                  <td className="border border-slate-400 px-4 py-4 text-center text-indigo-700 text-xl">{totals.totalQty}</td>
+                  <td className="border border-slate-400 px-4 py-4 text-center text-purple-700 text-xl">{totals.totalFree}</td>
+                  <td className="border border-slate-400 px-4 py-4" colSpan={10}></td>
+                  <td className="border border-slate-400 px-4 py-4 text-right text-amber-700 text-lg">{fmtINR(totals.sgst)}</td>
+                  <td className="border border-slate-400 px-4 py-4"></td>
+                  <td className="border border-slate-400 px-4 py-4 text-right text-amber-700 text-lg">{fmtINR(totals.cgst)}</td>
+                  <td className="border border-slate-400 px-4 py-4 text-right text-indigo-700 text-2xl">
+                    {fmtINR(totals.total)}
+                  </td>
+                  <td className="border border-slate-400 px-4 py-4"></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {/* GST Summary Footer */}
+      <div className="px-6 py-4 bg-white border-t shadow-lg">
+        <div className="grid grid-cols-12 gap-4">
+          <div className="col-span-8 border-2 border-indigo-200 rounded-xl p-4 bg-gradient-to-br from-indigo-50 to-blue-50">
+            <div className="text-base font-bold text-indigo-900 mb-3">GST BREAKDOWN</div>
+            <table className="w-full text-sm">
+              <thead className="bg-indigo-100">
+                <tr>
+                  <th className="border border-indigo-300 px-4 py-3 text-left font-bold">CLASS</th>
+                  <th className="border border-indigo-300 px-4 py-3 text-right font-bold">TAXABLE</th>
+                  <th className="border border-indigo-300 px-4 py-3 text-right font-bold">SGST</th>
+                  <th className="border border-indigo-300 px-4 py-3 text-right font-bold">CGST</th>
+                  <th className="border border-indigo-300 px-4 py-3 text-right font-bold">TOTAL GST</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(gstBreakdown).map(([rate, data]) => (
+                  <tr key={rate} className="hover:bg-indigo-50">
+                    <td className="border border-indigo-200 px-4 py-3 font-bold text-base">GST {rate}%</td>
+                    <td className="border border-indigo-200 px-4 py-3 text-right text-base">{fmtINR(data.taxable)}</td>
+                    <td className="border border-indigo-200 px-4 py-3 text-right text-amber-600 font-semibold">{fmtINR(data.sgst)}</td>
+                    <td className="border border-indigo-200 px-4 py-3 text-right text-amber-600 font-semibold">{fmtINR(data.cgst)}</td>
+                    <td className="border border-indigo-200 px-4 py-3 text-right font-bold text-indigo-700 text-base">
+                      {fmtINR(data.cgst + data.sgst)}
+                    </td>
+                  </tr>
+                ))}
+                {Object.keys(gstBreakdown).length === 0 && (
+                  <tr>
+                    <td className="border border-indigo-200 px-4 py-6 text-center text-slate-500" colSpan={5}>
+                      No GST data available
+                    </td>
+                  </tr>
+                )}
+              </tbody>
             </table>
           </div>
 
-          {/* Add Row */}
-          <div className="bg-white px-4 py-2 border-t">
-            <button
-              onClick={addRow}
-              className="px-4 py-1.5 bg-gradient-to-r from-slate-600 to-slate-500 text-white text-xs rounded-lg hover:shadow-lg transition-all flex items-center space-x-2 font-semibold"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-              </svg>
-              <span>Add Row (Enter)</span>
-            </button>
-          </div>
-
-          {/* Totals Bar */}
-          <div className="bg-gradient-to-r from-slate-100 to-white px-4 py-2 border-t-2 grid grid-cols-6 gap-2">
-            <div className="bg-white rounded-lg p-2 border border-slate-200 shadow-sm">
-              <p className="text-[9px] text-gray-600 font-bold mb-0.5">Total Qty</p>
-              <p className="text-base font-bold text-blue-700">{totals.totalQty}</p>
+          {/* Summary Cards */}
+          <div className="col-span-4 space-y-3">
+            <div className="bg-gradient-to-br from-emerald-50 to-green-100 p-4 rounded-xl border-2 border-emerald-300">
+              <div className="text-sm font-semibold text-emerald-700 mb-1">GRAND TOTAL</div>
+              <div className="text-4xl font-bold text-emerald-800">{fmtINR(Math.round(totals.total))}</div>
             </div>
-            <div className="bg-white rounded-lg p-2 border border-slate-200 shadow-sm">
-              <p className="text-[9px] text-gray-600 font-bold mb-0.5">Gross Total</p>
-              <p className="text-base font-bold text-green-700">₹{totals.grossTotal.toFixed(2)}</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-gradient-to-br from-amber-50 to-yellow-100 p-3 rounded-xl border-2 border-amber-300">
+                <div className="text-xs font-semibold text-amber-700 mb-1">SGST</div>
+                <div className="text-lg font-bold text-amber-800">{fmtINR(totals.sgst)}</div>
+              </div>
+              <div className="bg-gradient-to-br from-orange-50 to-red-100 p-3 rounded-xl border-2 border-orange-300">
+                <div className="text-xs font-semibold text-orange-700 mb-1">CGST</div>
+                <div className="text-lg font-bold text-orange-800">{fmtINR(totals.cgst)}</div>
+              </div>
             </div>
-            <div className="bg-white rounded-lg p-2 border border-slate-200 shadow-sm">
-              <p className="text-[9px] text-gray-600 font-bold mb-0.5">CGST</p>
-              <p className="text-base font-bold text-orange-700">₹{totals.totalCgst.toFixed(2)}</p>
-            </div>
-            <div className="bg-white rounded-lg p-2 border border-slate-200 shadow-sm">
-              <p className="text-[9px] text-gray-600 font-bold mb-0.5">SGST</p>
-              <p className="text-base font-bold text-orange-700">₹{totals.totalSgst.toFixed(2)}</p>
-            </div>
-            <div className="bg-white rounded-lg p-2 border border-slate-200 shadow-sm">
-              <p className="text-[9px] text-gray-600 font-bold mb-0.5">Round Off</p>
-              <p className="text-base font-bold text-purple-700">₹{totals.roundOff.toFixed(2)}</p>
-            </div>
-            <div className="bg-gradient-to-br from-indigo-600 to-indigo-700 rounded-lg p-2 shadow-lg flex flex-col items-center justify-center text-white">
-              <p className="text-[9px] font-bold uppercase mb-0.5">Bill Amount</p>
-              <p className="text-xl font-bold">₹{totals.finalAmount}</p>
-            </div>
-          </div>
-
-          {/* Actions */}
-          <div className="bg-white px-4 py-2 border-t flex justify-between items-center">
-            <div className="flex items-center space-x-2">
-              <label className="text-[10px] font-bold text-gray-600">Payment:</label>
-              <select
-                value={paymentMode}
-                onChange={e => setPaymentMode(e.target.value)}
-                className="px-2 py-1 text-xs border-2 border-gray-300 rounded font-semibold"
-              >
-                <option value="Cash">Cash</option>
-                <option value="UPI">UPI</option>
-                <option value="Card">Card</option>
-                <option value="Credit">Credit</option>
-              </select>
-            </div>
-
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={handlePreview}
-                className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs rounded-lg font-bold"
-              >
-                Preview
-              </button>
-              <button
-                onClick={handleSave}
-                className="px-4 py-1.5 bg-primary hover:bg-primary/90 text-white text-xs rounded-lg font-bold shadow"
-              >
-                Save & Print
-              </button>
-              <button
-                onClick={onClose}
-                className="px-3 py-1.5 bg-gray-200 hover:bg-gray-300 text-gray-800 text-xs rounded-lg font-bold"
-              >
-                Close
-              </button>
+            <div className="bg-gradient-to-br from-purple-50 to-violet-100 p-3 rounded-xl border-2 border-purple-300">
+              <div className="text-xs font-semibold text-purple-700 mb-1">POTENTIAL PROFIT</div>
+              <div className="text-2xl font-bold text-purple-900">{fmtINR(totals.potentialProfit)}</div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Preview / Print Modal */}
-      {showPreview && (
-        <div className="fixed inset-0 bg-black/70 z-[70] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl h-[85vh] overflow-hidden flex flex-col">
-            <div className="px-4 py-2 bg-gradient-to-r from-slate-800 to-slate-700 text-white flex justify-between items-center">
-              <h3 className="font-bold">Invoice Preview</h3>
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={() => {
-                    const iframe = document.getElementById('print-iframe') as HTMLIFrameElement;
-                    iframe?.contentWindow?.print();
-                  }}
-                  className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-xs rounded-lg font-bold"
-                >
-                  Print
-                </button>
-                <button
-                  onClick={() => setShowPreview(false)}
-                  className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white text-xs rounded-lg font-bold"
-                >
-                  Close
-                </button>
+      {/* PRODUCT SEARCH MODAL */}
+      {showProductSearch && (
+        <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-md flex items-center justify-center p-6">
+          <div className="bg-white w-full max-w-5xl rounded-2xl shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-purple-800 to-purple-900 text-white flex items-center justify-between">
+              <div>
+                <h3 className="text-xl font-bold">🔍 Product Search</h3>
+                <p className="text-sm text-white/70 mt-0.5">Search by item code, name, or batch</p>
               </div>
+              <button
+                onClick={() => setShowProductSearch(false)}
+                className="px-4 py-2 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-semibold"
+              >
+                ✕ Close
+              </button>
             </div>
-            <div className="flex-1 overflow-hidden">
-              <iframe id="print-iframe" title="Invoice Preview" className="w-full h-full bg-white" srcDoc={previewHTML} />
+
+            <div className="p-6">
+              <div className="mb-4">
+                <input
+                  value={productQuery}
+                  onChange={e => setProductQuery(e.target.value)}
+                  placeholder="Type to search products..."
+                  className="w-full px-5 py-4 border-2 border-purple-300 rounded-xl text-base focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                  autoFocus
+                />
+              </div>
+
+              <div className="max-h-[500px] overflow-auto border-2 border-purple-200 rounded-xl">
+                {filteredProducts.map((product, idx) => (
+                  <div
+                    key={idx}
+                    onClick={() => selectProduct(product)}
+                    className="p-4 border-b border-slate-200 hover:bg-purple-50 cursor-pointer transition-colors"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="text-base font-bold text-slate-900">{product.itemName}</div>
+                        <div className="text-sm text-slate-600 mt-1">Code: {product.itemCode}</div>
+                        <div className="flex items-center space-x-3 mt-2 text-sm">
+                          <span className="px-3 py-1 bg-purple-100 text-purple-700 rounded-lg font-mono font-bold">
+                            {product.batch}
+                          </span>
+                          <span className="text-slate-500">Exp: {product.expiryDate}</span>
+                          <span className="text-emerald-600 font-semibold">MRP: ₹{product.mrp.toFixed(2)}</span>
+                          <span className="text-indigo-600 font-semibold">HSN: {product.hsnCode}</span>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-xs text-slate-500">Stock</div>
+                        <div className="text-2xl font-bold text-indigo-700">{product.stockQuantity}</div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {filteredProducts.length === 0 && productQuery && (
+                  <div className="p-12 text-center text-slate-500">
+                    <div className="text-5xl mb-3">🔍</div>
+                    <div className="text-base font-semibold">No products found</div>
+                  </div>
+                )}
+                {!productQuery && (
+                  <div className="p-12 text-center text-slate-400">
+                    <div className="text-5xl mb-3">📦</div>
+                    <div className="text-base">Start typing to search products</div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Product Search Modal */}
-      <ProductSearchModal
-        open={openSearch}
-        prefix={searchPrefix}
-        products={inv}
-        onClose={() => setOpenSearch(false)}
-        onSelect={(picked) => {
-          if (searchRow !== null) applyPickedToRow(searchRow, picked);
-          setOpenSearch(false);
-        }}
-      />
-    </>
+      {/* BILL PREVIEW MODAL */}
+      {showBillPreview && billPreviewHTML && (
+        <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
+          <div className="bg-white w-full max-w-[95vw] max-h-[90vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            <div className="px-6 py-4 bg-gradient-to-r from-slate-800 to-indigo-900 text-white flex items-center justify-between">
+              <h3 className="text-xl font-bold">📄 Purchase Invoice Preview - Plain White Bill with Profit Analysis</h3>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={printBill}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-sm font-bold"
+                >
+                  🖨️ Print
+                </button>
+                <button
+                  onClick={saveToPDF}
+                  className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 rounded-lg text-sm font-bold"
+                >
+                  📄 Save PDF
+                </button>
+                <button
+                  onClick={() => setShowBillPreview(false)}
+                  className="px-4 py-2 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-semibold"
+                >
+                  ✕ Close
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto p-6 bg-slate-100">
+              <div className="bg-white shadow-xl mx-auto" style={{ width: '297mm', minHeight: '210mm' }}>
+                <div dangerouslySetInnerHTML={{ __html: billPreviewHTML }} />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
-

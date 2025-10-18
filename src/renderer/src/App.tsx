@@ -10,6 +10,11 @@ import InventoryManagement from './components/inventory/InventoryManagement';
 import SalesInvoice from './components/SalesInvoice';
 import AllInvoices from './components/AllInvoices';
 import StockImport from './components/StockImport';
+// ADD THIS LINE after your other imports
+
+import PurchaseInvoice from './components/PurchaseInvoice';  // ✅ ADD THIS LINE
+
+
 
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import AuthWrapper from './components/auth/AuthWrapper';
@@ -63,6 +68,8 @@ function MainApp() {
   const [dataLoading, setDataLoading] = useState(true);
   const [showSalesInvoice, setShowSalesInvoice] = useState(false);
   const [showStockImport, setShowStockImport] = useState(false);
+  const [showPurchaseImport, setShowPurchaseImport] = useState(false); // ✅ ADD THIS LINE
+
 
   useEffect(() => {
     if (currentUser) {
@@ -78,13 +85,19 @@ function MainApp() {
         e.preventDefault();
         setShowSalesInvoice(true);
       }
-      
+
       // F3 key - Open Stock Import
       if (e.key === 'F3') {
         e.preventDefault();
         setShowStockImport(true);
       }
-      
+
+      // ✅ ADD THIS: F4 key - Open Purchase Import
+      if (e.key === 'F4') {
+        e.preventDefault();
+        setShowPurchaseImport(true);
+      }
+
       // Ctrl+N (Windows) or Cmd+N (Mac) - Open Sales Invoice
       if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
         e.preventDefault();
@@ -97,19 +110,27 @@ function MainApp() {
         setShowStockImport(true);
       }
 
+      // ✅ ADD THIS: Ctrl+P (Windows) or Cmd+P (Mac) - Open Purchase Import
+      if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+        e.preventDefault();
+        setShowPurchaseImport(true);
+      }
+
       // Escape - Close modals
       if (e.key === 'Escape') {
         if (showSalesInvoice) setShowSalesInvoice(false);
         if (showStockImport) setShowStockImport(false);
+        if (showPurchaseImport) setShowPurchaseImport(false); // ✅ ADD THIS LINE
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    
+
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [showSalesInvoice, showStockImport]);
+  }, [showSalesInvoice, showStockImport, showPurchaseImport]); // ✅ ADD showPurchaseImport to dependencies
+
 
   const loadData = async () => {
     setDataLoading(true);
@@ -151,10 +172,10 @@ function MainApp() {
         userId: currentUser?.uid,
         createdAt: new Date().toISOString()
       });
-      
+
       setSuccessMessage('Invoice created successfully!');
       setShowSuccess(true);
-      
+
       setTimeout(() => {
         setShowSuccess(false);
         fetchInvoices();
@@ -198,7 +219,6 @@ function MainApp() {
           onClose={() => setShowSuccess(false)}
         />
       )}
-
       {/* Sales Invoice Modal */}
       {showSalesInvoice && (
         <SalesInvoice onClose={() => setShowSalesInvoice(false)} />
@@ -207,6 +227,11 @@ function MainApp() {
       {/* Stock Import Modal */}
       {showStockImport && (
         <StockImport onClose={() => setShowStockImport(false)} />
+      )}
+
+      {/* ✅ ADD THIS: Purchase Import Modal */}
+      {showPurchaseImport && (
+        <PurchaseImport onClose={() => setShowPurchaseImport(false)} />
       )}
 
       <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
@@ -227,7 +252,7 @@ function MainApp() {
                   <p className="text-xs md:text-sm text-slate-500">{userData?.branchLocation || 'Billing System'}</p>
                 </div>
               </div>
-              
+
               <div className="flex items-center space-x-2 md:space-x-6">
                 {/* Stats Badge - Hidden on mobile */}
                 <div className="hidden lg:flex items-center space-x-4">
@@ -256,7 +281,7 @@ function MainApp() {
                     <span className="font-semibold">New Invoice</span>
                     <span className="text-xs bg-white/20 px-2 py-0.5 rounded">F2</span>
                   </button>
-                  
+
                   <button
                     onClick={() => setShowStockImport(true)}
                     className="flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-purple-500 to-violet-600 text-white rounded-xl hover:shadow-lg hover:scale-105 transition-all duration-300"
@@ -268,6 +293,7 @@ function MainApp() {
                     <span className="font-semibold">Import</span>
                     <span className="text-xs bg-white/20 px-2 py-0.5 rounded">F3</span>
                   </button>
+
                 </div>
 
                 {/* User Info & Logout */}
@@ -296,49 +322,59 @@ function MainApp() {
           <div className="container mx-auto px-4 md:px-6">
             <div className="flex space-x-1">
               {[
-                { 
-                  id: 'dashboard', 
-                  label: 'Dashboard', 
+                {
+                  id: 'dashboard',
+                  label: 'Dashboard',
                   icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6',
                   mobileLabel: 'Home'
                 },
-                { 
-                  id: 'inventory', 
-                  label: 'Inventory', 
+                {
+                  id: 'inventory',
+                  label: 'Inventory',
                   icon: 'M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4',
                   mobileLabel: 'Stock'
                 },
-                { 
-                  id: 'import', 
-                  label: 'Import Stock', 
+                {
+                  id: 'import',
+                  label: 'Import Stock',
                   icon: 'M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12',
                   mobileLabel: 'Import',
                   badge: 'F3',
                   action: () => setShowStockImport(true)
                 },
+                // ✅ ADD THIS ENTIRE OBJECT:
                 { 
-                  id: 'search', 
-                  label: 'Search Products', 
+                  id: 'purchases', 
+                  label: 'Purchase Entry', 
+                  icon: 'M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z',
+                  mobileLabel: 'Purchases',
+                  badge: 'F4'
+                  // NO action property - it's now a regular tab
+                },
+                
+                {
+                  id: 'search',
+                  label: 'Search Products',
                   icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z',
                   mobileLabel: 'Search'
                 },
-                { 
-                  id: 'sales', 
-                  label: 'Sales Invoice', 
+                {
+                  id: 'sales',
+                  label: 'Sales Invoice',
                   icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2',
                   mobileLabel: 'Sales',
                   badge: 'F2',
                   action: () => setShowSalesInvoice(true)
                 },
-                { 
-                  id: 'invoices', 
-                  label: 'All Invoices', 
+                {
+                  id: 'invoices',
+                  label: 'All Invoices',
                   icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
                   mobileLabel: 'Invoices'
                 },
-                { 
-                  id: 'admin', 
-                  label: 'Admin Panel', 
+                {
+                  id: 'admin',
+                  label: 'Admin Panel',
                   icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z',
                   mobileLabel: 'Admin'
                 }
@@ -352,11 +388,10 @@ function MainApp() {
                       setActiveTab(tab.id);
                     }
                   }}
-                  className={`px-4 md:px-6 py-4 font-semibold transition-all duration-300 relative flex items-center space-x-2 whitespace-nowrap ${
-                    activeTab === tab.id
+                  className={`px-4 md:px-6 py-4 font-semibold transition-all duration-300 relative flex items-center space-x-2 whitespace-nowrap ${activeTab === tab.id
                       ? 'text-primary border-b-4 border-primary'
                       : 'text-slate-600 hover:text-primary hover:bg-slate-50'
-                  }`}
+                    }`}
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={tab.icon} />
@@ -407,16 +442,18 @@ function MainApp() {
         </div>
 
         {/* Main Content */}
-        <main className="container mx-auto px-4 md:px-6 py-6 md:py-8">
-          <div className="animate-fadeIn">
-            {activeTab === 'dashboard' && <Dashboard invoices={invoices} />}
-            {activeTab === 'inventory' && <InventoryManagement />}
-           
-            {activeTab === 'create' && <InvoiceForm onSubmit={handleCreateInvoice} customers={customers} />}
-            {activeTab === 'invoices' && <AllInvoices/>}
-          
-          </div>
-        </main>
+       {/* Main Content */}
+<main className="container mx-auto px-4 md:px-6 py-6 md:py-8">
+  <div className="animate-fadeIn">
+    {activeTab === 'dashboard' && <Dashboard invoices={invoices} />}
+    {activeTab === 'inventory' && <InventoryManagement />}
+    {activeTab === 'create' && <InvoiceForm onSubmit={handleCreateInvoice} customers={customers} />}
+    {activeTab === 'invoices' && <AllInvoices/>}
+    {/* ✅ ADD THIS LINE BELOW */}
+    {activeTab === 'purchases' && <PurchaseInvoice />}
+  </div>
+</main>
+
 
         {/* Footer */}
         <footer className="bg-white border-t border-slate-200 mt-12 animate-fadeIn">
@@ -454,6 +491,7 @@ function MainApp() {
 }
 
 function App() {
+
   return (
     <AuthProvider>
       <MainApp />

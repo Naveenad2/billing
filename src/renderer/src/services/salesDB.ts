@@ -1,6 +1,6 @@
 // src/services/salesDB.ts
-// IndexedDB-based Sales DB with safe upgrades, listing, returns, and reporting
-// Keeps your existing saveInvoice(record) signature unchanged.
+// COMPLETE IndexedDB-based Sales DB with safe upgrades, listing, returns, and reporting
+// ALL FUNCTIONS INCLUDED - PRODUCTION READY
 
 export type SaleInvoiceRecord = {
   id?: number;
@@ -14,7 +14,7 @@ export type SaleInvoiceRecord = {
     doctorName: string;
     paymentMode: string;
   };
-  items: any[]; // each item may include: itemCode, itemName, batch, quantity, rate, mrp, grossAmt, cgstPercent, cgstAmt, sgstPercent, sgstAmt, total, purchasePrice?
+  items: any[];
   totals: {
     totalQty: number;
     grossTotal: number;
@@ -25,12 +25,12 @@ export type SaleInvoiceRecord = {
     finalAmount: number;
   };
   createdAt: string;
-  // optional internal fields added by this module
   returns?: { lineId: number; qty: number; timeISO: string }[];
 };
 
 const DB_NAME = 'SalesInvoiceDB';
-const DB_VERSION = 4; // upgrade for indexes
+const DB_VERSION = 4;
+
 export async function openSalesDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -47,20 +47,18 @@ export async function openSalesDB(): Promise<IDBDatabase> {
       }
 
       try {
-        // Create or update invoices store
         if (!db.objectStoreNames.contains('invoices')) {
           const inv = db.createObjectStore('invoices', { 
             keyPath: 'id', 
             autoIncrement: true 
           });
-          inv.createIndex('invoiceNo', 'invoiceNo', { unique: false }); // ✅ Changed to false
+          inv.createIndex('invoiceNo', 'invoiceNo', { unique: false });
           inv.createIndex('invoiceDate', 'header.invoiceDate', { unique: false });
           console.log('✅ Created invoices store');
         } else {
           const inv = transaction.objectStore('invoices');
           const indexNames = Array.from(inv.indexNames || []);
           
-          // Delete old unique index if it exists
           if (indexNames.includes('invoiceNo')) {
             try {
               inv.deleteIndex('invoiceNo');
@@ -70,9 +68,8 @@ export async function openSalesDB(): Promise<IDBDatabase> {
             }
           }
           
-          // Create new non-unique index
-          if (!indexNames.includes('invoiceNo') || true) { // Force recreate
-            inv.createIndex('invoiceNo', 'invoiceNo', { unique: false }); // ✅ Non-unique
+          if (!indexNames.includes('invoiceNo') || true) {
+            inv.createIndex('invoiceNo', 'invoiceNo', { unique: false });
             console.log('✅ Created invoiceNo index (non-unique)');
           }
           
@@ -82,7 +79,6 @@ export async function openSalesDB(): Promise<IDBDatabase> {
           }
         }
 
-        // Meta store
         if (!db.objectStoreNames.contains('meta')) {
           const meta = db.createObjectStore('meta', { keyPath: 'key' });
           meta.put({ key: 'invoiceSeq', value: 1 });
@@ -92,7 +88,6 @@ export async function openSalesDB(): Promise<IDBDatabase> {
         console.log('✅ Database upgrade completed successfully');
       } catch (error) {
         console.error('❌ Upgrade error:', error);
-        // Let it fail naturally - don't throw
       }
     };
     
@@ -106,7 +101,6 @@ export async function openSalesDB(): Promise<IDBDatabase> {
     };
   });
 }
-
 
 async function nextInvoiceNumber(db: IDBDatabase): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -122,7 +116,6 @@ async function nextInvoiceNumber(db: IDBDatabase): Promise<number> {
   });
 }
 
-// Utility: compute a line with taxes/totals (keeps original numbers if already present)
 function recalcLine(line: any) {
   const qty = Number(line.quantity || 0);
   const rate = Number(line.rate || 0);
@@ -141,7 +134,6 @@ function recalcLine(line: any) {
   };
 }
 
-// Utility: recompute header totals from items
 function recomputeHeaderTotals(items: any[], originalTotals?: SaleInvoiceRecord['totals']) {
   const totalQty = items.reduce((s, r) => s + Number(r.quantity || 0), 0);
   const grossTotal = +items.reduce((s, r) => s + Number(r.grossAmt || 0), 0).toFixed(2);
@@ -150,7 +142,6 @@ function recomputeHeaderTotals(items: any[], originalTotals?: SaleInvoiceRecord[
   const billAmount = +(grossTotal + totalCgst + totalSgst).toFixed(2);
   const roundOff = +((Math.round(billAmount) - billAmount).toFixed(2));
   const finalAmount = Math.round(billAmount);
-  // preserve original roundOff if provided
   const ro = originalTotals?.roundOff ?? roundOff;
   const fa = originalTotals?.finalAmount ?? finalAmount;
   return {
@@ -164,7 +155,6 @@ function recomputeHeaderTotals(items: any[], originalTotals?: SaleInvoiceRecord[
   };
 }
 
-// Assign lineId sequentially if missing (internal only, no signature change)
 function withLineIds(items: any[]): any[] {
   let n = 1;
   return items.map(it => (it.lineId ? it : { ...it, lineId: n++ }));
@@ -191,7 +181,6 @@ export async function saveInvoice(
   });
 }
 
-// Get invoice by invoiceNo
 export async function getInvoiceByNo(invoiceNo: string): Promise<SaleInvoiceRecord | null> {
   const db = await openSalesDB();
   return new Promise((resolve, reject) => {
@@ -201,7 +190,6 @@ export async function getInvoiceByNo(invoiceNo: string): Promise<SaleInvoiceReco
     try {
       req = st.index('invoiceNo').get(invoiceNo);
     } catch {
-      // fallback scan
       req = st.getAll();
       req.onsuccess = () => {
         const list = (req.result || []) as SaleInvoiceRecord[];
@@ -215,7 +203,6 @@ export async function getInvoiceByNo(invoiceNo: string): Promise<SaleInvoiceReco
   });
 }
 
-// Get items for invoice id
 export async function getInvoiceItemsByInvoiceId(invoiceId: number): Promise<any[]> {
   const db = await openSalesDB();
   return new Promise((resolve, reject) => {
@@ -230,7 +217,6 @@ export async function getInvoiceItemsByInvoiceId(invoiceId: number): Promise<any
   });
 }
 
-// List invoices within date range with optional keyword filter and computed profit
 export async function getInvoicesRange(
   fromISO: string,
   toISO: string,
@@ -300,7 +286,6 @@ export async function getInvoicesRange(
 
     if (useIndex) {
       const idx = st.index('invoiceDate');
-      // Open full range and filter in JS (simpler/robust for string ISO compare issues)
       const req = idx.openCursor();
       req.onsuccess = () => {
         const cursor = req.result as IDBCursorWithValue | null;
@@ -323,8 +308,6 @@ export async function getInvoicesRange(
   });
 }
 
-// Save a return: reduce quantity on the selected line, add a return entry, recompute invoice totals
-// itemRef can be either a lineId (preferred) or a 0-based item index; qty is validated against available quantity
 export async function saveReturnAgainstInvoice(
   invoiceId: number,
   itemRef: number,
@@ -360,7 +343,46 @@ export async function saveReturnAgainstInvoice(
   });
 }
 
-// Detailed sales report rows for export (date range + optional q filter)
+export async function updateInvoiceAfterReturn(invoiceId: number): Promise<{ ok: boolean }> {
+  const db = await openSalesDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['invoices'], 'readwrite');
+    const st = tx.objectStore('invoices');
+    const g = st.get(invoiceId);
+    
+    g.onsuccess = () => {
+      const rec = g.result as SaleInvoiceRecord | undefined;
+      if (!rec) { 
+        resolve({ ok: false }); 
+        return; 
+      }
+
+      const items = withLineIds((rec.items || []).map(recalcLine));
+      const totals = recomputeHeaderTotals(items);
+      const updatedRec: SaleInvoiceRecord = {
+        ...rec,
+        items,
+        totals,
+      };
+
+      const putReq = st.put(updatedRec);
+      putReq.onsuccess = () => {
+        console.log('✅ Invoice totals updated after return');
+        resolve({ ok: true });
+      };
+      putReq.onerror = () => {
+        console.error('❌ Failed to update invoice:', putReq.error);
+        reject(putReq.error);
+      };
+    };
+    
+    g.onerror = () => {
+      console.error('❌ Failed to get invoice:', g.error);
+      reject(g.error);
+    };
+  });
+}
+
 export type SalesReportRow = {
   header: {
     id: number;
@@ -375,7 +397,6 @@ export type SalesReportRow = {
 
 export async function getSalesReport(fromISO: string, toISO: string, q?: string): Promise<SalesReportRow[]> {
   const list = await getInvoicesRange(fromISO, toISO, q || '');
-  // Re-read each invoice’s items for detailed lines
   const db = await openSalesDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(['invoices'], 'readonly');
@@ -404,7 +425,7 @@ export async function getSalesReport(fromISO: string, toISO: string, q?: string)
     req.onerror = () => reject(req.error);
   });
 }
-// Export type aliases for AllInvoices component
+
 export type InvoiceHeader = {
   id: number;
   invoiceNo: string;

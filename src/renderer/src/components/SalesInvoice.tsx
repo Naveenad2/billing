@@ -1,7 +1,5 @@
 // src/components/SalesInvoice.tsx
-// A4 Invoice (sample photo style) • 7 rows per printed page • Single-copy print (printer handles copies)
-// Electron + SQLite (InventoryDB) • Smooth keyboard nav • Optional customer/phone/doctor
-// Live "saved amount" • Auto-invoice numbering from 1 • Merge same item rows • Refresh inventory after save
+// COMPLETE FINAL CODE - NO GST IN FINAL AMOUNT, BLACK TEXT, 7 ROWS PER PAGE
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { saveInvoice } from '../services/salesDB';
@@ -54,7 +52,6 @@ type PickedRow = {
   quantity: number;
 };
 
-/***** Inventory IPC (from preload) *****/
 declare global {
   interface Window {
     inventory?: {
@@ -68,7 +65,6 @@ declare global {
   }
 }
 
-/***** Helpers *****/
 const MMYY = (exp?: string) => {
   if (!exp) return '';
   if (/^\d{2}\/\d{2}$/.test(exp)) return exp;
@@ -82,11 +78,16 @@ const MMYY = (exp?: string) => {
 const keyFor = (code: string, batch: string) => `${code}||${batch}`;
 
 const nextInvoiceNo = (): string => {
-  // Stored numeric sequence starting from 1
   const k = 'sales_invoice_seq_v1';
   const n = Number(localStorage.getItem(k) || '0') + 1;
   localStorage.setItem(k, String(n));
-  return String(n); // pure number like sample photo
+  return String(n);
+};
+
+const calculateRateFromMRP = (mrp: number): number => {
+  const discountAmount = mrp * 0.12;
+  const rate = mrp - discountAmount;
+  return Number(rate.toFixed(2));
 };
 
 /***** Product Search Modal *****/
@@ -120,20 +121,10 @@ function ProductSearchModal({
     if (open) {
       setTimeout(() => {
         modalRef.current?.focus();
-        inputRef.current?.focus(); // keep cursor in search box
+        inputRef.current?.focus();
       }, 0);
     }
   }, [open]);
-
-  const codesWithStock = useMemo(() => {
-    const set = new Set<string>();
-    products.forEach(p => {
-      const k = keyFor(p.itemCode || '', p.batch || '');
-      const avail = Number(p.stockQuantity || 0) - Number(pendingQty[k] || 0);
-      if (avail >= 1) set.add(p.itemCode || '');
-    });
-    return set;
-  }, [products, pendingQty]);
 
   const heads = useMemo(() => {
     const map = new Map<string, InvProduct>();
@@ -162,12 +153,14 @@ function ProductSearchModal({
       .map(p => {
         const k = keyFor(p.itemCode || '', p.batch || '');
         const avail = Math.max(0, Number(p.stockQuantity || 0) - Number(pendingQty[k] || 0));
+        const mrpN = Number(p.mrp || 0);
+        const rateN = calculateRateFromMRP(mrpN);
         return {
           ...p,
           batch: p.batch || '-',
           expiry: MMYY(p.expiryDate || ''),
-          mrpN: Number(p.mrp || 0),
-          rateN: Number(p.sellingPriceTab || 0),
+          mrpN,
+          rateN,
           cgstN: Number(p.cgstRate || 0),
           sgstN: Number(p.sgstRate || 0),
           packN: Number(p.pack || 1),
@@ -375,6 +368,7 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
   const [contactNo, setContactNo] = useState('');
   const [doctorName, setDoctorName] = useState('');
   const [paymentMode, setPaymentMode] = useState('Cash');
+  const [discountPercent, setDiscountPercent] = useState(0);
 
   const [items, setItems] = useState<InvoiceItem[]>([
     { no: 1, itemCode: '', itemName: '', hsnCode: '', batch: '', expiryDate: '', quantity: 0, pack: 1,
@@ -389,7 +383,6 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
   const [previewHTML, setPreviewHTML] = useState('');
   const [showPreview, setShowPreview] = useState(false);
 
-  // For live “available” while picking
   const pendingQty = useMemo(() => {
     const map: Record<string, number> = {};
     for (const r of items) {
@@ -417,21 +410,38 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
     }
   };
   useEffect(() => { loadInventory(); }, []);
-
-  /***** Row math *****/
-  const calcRow = (r: InvoiceItem): InvoiceItem => {
-    const gross = (r.quantity || 0) * (r.rate || 0);
-    const cgstAmt = (gross * (r.cgstPercent || 0)) / 100;
-    const sgstAmt = (gross * (r.sgstPercent || 0)) / 100;
-    const total = gross + cgstAmt + sgstAmt;
-    return {
-      ...r,
-      grossAmt: Number(gross.toFixed(2)),
-      cgstAmt: Number(cgstAmt.toFixed(2)),
-      sgstAmt: Number(sgstAmt.toFixed(2)),
-      total: Number(total.toFixed(2)),
-    };
+// ✅ UPDATED calcRow function - REVERSE GST CALCULATION
+const calcRow = (r: InvoiceItem): InvoiceItem => {
+  const rate = r.rate || 0;
+  const qty = r.quantity || 0;
+  
+  // Total INCLUDES GST (Rate × Qty is the final selling price with GST)
+  const totalWithGST = qty * rate;
+  
+  // Calculate GST percentage
+  const cgstPercent = r.cgstPercent || 0;
+  const sgstPercent = r.sgstPercent || 0;
+  const totalGSTPercent = cgstPercent + sgstPercent;
+  
+  // Reverse calculate: Remove GST to get taxable value
+  // Formula: Taxable = Total ÷ (1 + GST%)
+  const taxableValue = totalGSTPercent > 0 
+    ? totalWithGST / (1 + (totalGSTPercent / 100))
+    : totalWithGST;
+  
+  // Calculate GST amounts from taxable value
+  const cgstAmt = (taxableValue * cgstPercent) / 100;
+  const sgstAmt = (taxableValue * sgstPercent) / 100;
+  
+  return {
+    ...r,
+    grossAmt: Number(taxableValue.toFixed(2)),      // ✅ Taxable value (GST removed)
+    cgstAmt: Number(cgstAmt.toFixed(2)),            // ✅ CGST amount
+    sgstAmt: Number(sgstAmt.toFixed(2)),            // ✅ SGST amount
+    total: Number(totalWithGST.toFixed(2)),         // ✅ Final amount (with GST)
   };
+};
+
 
   const setRow = (idx: number, updater: (row: InvoiceItem) => InvoiceItem) => {
     setItems(prev => {
@@ -488,7 +498,7 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
       quantity: picked.quantity || 1,
     }));
     setOpenSearch(false);
-    setTimeout(() => inputRefs.current[`${idx}-quantity`] ?.focus(), 30);
+    setTimeout(() => inputRefs.current[`${idx}-quantity`]?.focus(), 30);
   };
 
   const columns = ['itemCode','itemName','batch','expiryDate','quantity','pack','mrp','rate','cgstPercent','sgstPercent'] as const;
@@ -546,6 +556,7 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
     setCustomerName('');
     setContactNo('');
     setDoctorName('');
+    setDiscountPercent(0);
     setItems([{
       no: 1, itemCode: '', itemName: '', hsnCode: '', batch: '', expiryDate: '',
       quantity: 0, pack: 1, mrp: 0, rate: 0, grossAmt: 0,
@@ -554,7 +565,6 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
     setInvoiceNo(nextInvoiceNo());
   };
 
-  /***** Totals *****/
   const totals = useMemo(() => {
     const totalQty = items.reduce((s, r) => s + (r.quantity || 0), 0);
     const grossTotal = items.reduce((s, r) => s + (r.grossAmt || 0), 0);
@@ -562,6 +572,12 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
     const totalSgst = items.reduce((s, r) => s + (r.sgstAmt || 0), 0);
     const billAmount = items.reduce((s, r) => s + (r.total || 0), 0);
     const savedFromMrp = items.reduce((s, r) => s + Math.max(0, (r.mrp - r.rate)) * (r.quantity || 0), 0);
+    
+    const discountAmount = Number(((billAmount * (discountPercent || 0)) / 100).toFixed(2));
+    const afterDiscount = Number((billAmount - discountAmount).toFixed(2));
+    const roundOff = Number((Math.round(afterDiscount) - afterDiscount).toFixed(2));
+    const finalAmount = Math.round(afterDiscount);
+    
     return {
       totalQty,
       grossTotal: Number(grossTotal.toFixed(2)),
@@ -569,11 +585,14 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
       totalSgst: Number(totalSgst.toFixed(2)),
       totalTax: Number((totalCgst + totalSgst).toFixed(2)),
       billAmount: Number(billAmount.toFixed(2)),
-      roundOff: Number((Math.round(billAmount) - billAmount).toFixed(2)),
-      finalAmount: Math.round(billAmount),
+      discountPercent: discountPercent || 0,
+      discountAmount,
+      afterDiscount,
+      roundOff,
+      finalAmount,
       savedFromMrp: Number(savedFromMrp.toFixed(2))
     };
-  }, [items]);
+  }, [items, discountPercent]);
 
   const gstSummary = useMemo(() => {
     const map = new Map<number, { taxable: number; taxAmt: number }>();
@@ -592,7 +611,7 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
     }));
   }, [items]);
 
-  /***** Printing (A4, 7 rows/page, single copy) *****/
+  /***** Printing - 7 ROWS PER PAGE *****/
   const PAGE_ROWS = 7;
 
   const splitPages = (rows: InvoiceItem[], pageSize = PAGE_ROWS) => {
@@ -642,15 +661,41 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
       td.right { text-align:right; }
       td.center { text-align:center; }
       .gstbox { width:100%; border:1px solid #000; border-top:none; padding:6px; }
-      .row { display:flex; justify-content:space-between; }
+      .row { display:flex; justify-content:space-between; margin-top:6px; }
       .small { font-size:9px; }
       .saved { font-weight:bold; }
+      .summary { 
+        margin-left:auto; 
+        width:260px; 
+        background:#f9fafb; 
+        border:2px solid #000; 
+        padding:10px; 
+        border-radius:4px;
+        margin-right:10px;
+      }
+      .summary-line {
+        display:flex;
+        justify-content:space-between;
+        padding:3px 0;
+        color:#000;
+        font-size:10px;
+      }
+      .summary-total {
+        display:flex;
+        justify-content:space-between;
+        padding:8px 0;
+        margin-top:6px;
+        border-top:2px solid #000;
+        font-weight:bold;
+        font-size:14px;
+        color:#000;
+      }
       .signature { text-align:right; margin-top:10px; font-size:10px; }
       .pb { page-break-after: always; }
     `;
 
     const gstTable = `
-      <table class="small" style="width:60%; margin-top:6px;">
+      <table class="small" style="width:50%; margin-top:6px;">
         <thead>
           <tr>
             <th style="width:70px;">GST %</th>
@@ -738,7 +783,7 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
                   <td class="right" style="font-weight:bold">${totals.totalCgst.toFixed(2)}</td>
                   <td></td>
                   <td class="right" style="font-weight:bold">${totals.totalSgst.toFixed(2)}</td>
-                  <td class="right" style="font-weight:bold">${(totals.finalAmount - totals.roundOff).toFixed(2)}</td>
+                  <td class="right" style="font-weight:bold">${totals.billAmount.toFixed(2)}</td>
                 </tr>
               </tfoot>
               ` : ''}
@@ -747,14 +792,25 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
 
           ${lastPage ? `
           <div class="gstbox">
-            ${gstTable}
-            <div class="row" style="margin-top:6px;">
-              <div class="small">Amount in words as per need</div>
-              <div class="small">
-                <div>Sub Total : <strong>₹${(totals.billAmount).toFixed(2)}</strong></div>
-                <div>Round Off : ${totals.roundOff >= 0 ? '' : '-'}<strong>₹${Math.abs(totals.roundOff).toFixed(2)}</strong></div>
-                <div class="saved">You Have saved : <strong>₹${totals.savedFromMrp.toFixed(2)}</strong></div>
-                <div style="font-size:14px; font-weight:bold; margin-top:4px;">Bill Amount : <span>₹${totals.finalAmount.toFixed(2)}</span></div>
+            <div class="row">
+              <div style="width:45%;">${gstTable}</div>
+              <div class="summary">
+                <div class="summary-line">
+                  <span>Sub Total:</span>
+                  <strong>₹${totals.billAmount.toFixed(2)}</strong>
+                </div>
+                <div class="summary-line">
+                  <span>Round Off:</span>
+                  <strong>${totals.roundOff >= 0 ? '' : '-'}₹${Math.abs(totals.roundOff).toFixed(2)}</strong>
+                </div>
+                <div class="summary-line" style="margin-top:4px; padding-top:4px; border-top:1px solid #ccc;">
+                  <span>Total Saved (MRP):</span>
+                  <strong style="color:#059669;">₹${totals.savedFromMrp.toFixed(2)}</strong>
+                </div>
+                <div class="summary-total">
+                  <span>Bill Amount:</span>
+                  <strong>₹${totals.finalAmount.toFixed(2)}</strong>
+                </div>
               </div>
             </div>
             <div class="signature">Authorised Signature</div>
@@ -777,7 +833,7 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
     `;
   };
 
-  /***** Save & Print *****/
+  /***** Save & Print WITH PREVIEW *****/
   const handleSave = async () => {
     const pickedItems = items.filter(i => i.itemName && i.quantity > 0);
     if (pickedItems.length === 0) {
@@ -802,7 +858,6 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
       return;
     }
 
-    // Decrement stock and refresh inventory
     const stockMessages: string[] = [];
     try {
       if (window.inventory?.decrementStockByCodeBatch) {
@@ -822,25 +877,28 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
     }
     await loadInventory();
 
-    // Build single-copy paginated print (7 rows/page)
     const pages = splitPages(pickedItems.map((r, i) => ({ ...r, no: i + 1 })), PAGE_ROWS);
     const html = buildPrintHTML(pages);
 
     setPreviewHTML(html);
     setShowPreview(true);
-    setTimeout(() => {
-      const iframe = document.getElementById('print-iframe') as HTMLIFrameElement;
-      iframe?.contentWindow?.print();
-    }, 500);
 
     showSaved(['✅ Saved Invoice #' + (saved?.invoiceNo || invoiceNo), ...stockMessages].join('\n'));
+  };
 
-    // Reset for next bill
+  const handlePrint = () => {
+    const iframe = document.getElementById('print-iframe') as HTMLIFrameElement;
+    iframe?.contentWindow?.print();
+  };
+
+  const handleClosePreview = () => {
+    setShowPreview(false);
     setItems([{
       no: 1, itemCode: '', itemName: '', hsnCode: '', batch: '', expiryDate: '',
       quantity: 0, pack: 1, mrp: 0, rate: 0, grossAmt: 0,
       cgstPercent: 2.5, cgstAmt: 0, sgstPercent: 2.5, sgstAmt: 0, total: 0
     }]);
+    setDiscountPercent(0);
     setInvoiceNo(nextInvoiceNo());
   };
 
@@ -848,7 +906,6 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
   return (
     <>
       <div className="fixed inset-0 bg-white z-50 overflow-hidden flex flex-col">
-        {/* Header */}
         <div className="bg-gradient-to-r from-indigo-600 to-purple-700 text-white px-4 py-2 flex items-center justify-between shadow">
           <div className="flex items-center space-x-4">
             <h2 className="text-lg font-bold">Sales Invoice</h2>
@@ -857,9 +914,8 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
           <button onClick={onClose} className="px-3 py-1 bg-white/20 rounded text-xs hover:bg-white/30">✕ Close</button>
         </div>
 
-        {/* Compact Form */}
         <div className="px-4 py-2 bg-slate-50 border-b">
-          <div className="grid grid-cols-8 gap-2 text-[11px]">
+          <div className="grid grid-cols-9 gap-2 text-[11px]">
             <div>
               <label className="block text-[10px] font-bold mb-0.5">Invoice No</label>
               <input value={invoiceNo} readOnly className="w-full px-2 py-1 border rounded text-[10px] bg-gray-100 font-mono" />
@@ -892,10 +948,21 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
                 <option>Cash</option><option>Card</option><option>UPI</option><option>Credit</option>
               </select>
             </div>
+            <div>
+              <label className="block text-[10px] font-bold mb-0.5">Discount %</label>
+              <input 
+                type="number" 
+                min="0" 
+                max="100" 
+                step="0.1"
+                value={discountPercent} 
+                onChange={e => setDiscountPercent(Math.max(0, Math.min(100, Number(e.target.value || 0))))} 
+                className="w-full px-2 py-1 border rounded text-[10px] text-center font-bold text-emerald-700" 
+              />
+            </div>
           </div>
         </div>
 
-        {/* Items table (unlimited rows in UI) */}
         <div className="flex-1 overflow-auto">
           <table className="w-full text-[10px] border-collapse">
             <thead className="bg-slate-700 text-white sticky top-0">
@@ -929,7 +996,7 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
                       onChange={e => handleItemCodeChange(idx, e.target.value)}
                       onKeyDown={e => handleKeyDown(e, idx, 0)}
                       className="w-full px-1 py-0.5 text-[10px] font-mono border-0 outline-none focus:bg-yellow-50"
-                      placeholder="Code (F3 search)"
+                      placeholder="Code (F3)"
                     />
                   </td>
                   <td className="px-1 py-0.5 border">
@@ -983,7 +1050,8 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
                   <td className="px-1 py-0.5 border">
                     <input
                       ref={el => inputRefs.current[`${idx}-mrp`] = el}
-                      type="number" step="0.01"
+                      type="number"
+                      step="0.01"
                       value={item.mrp || ''}
                       onChange={e => setRow(idx, r => ({ ...r, mrp: Number(e.target.value || 0) }))}
                       onKeyDown={e => handleKeyDown(e, idx, 6)}
@@ -993,39 +1061,49 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
                   <td className="px-1 py-0.5 border">
                     <input
                       ref={el => inputRefs.current[`${idx}-rate`] = el}
-                      type="number" step="0.01"
+                      type="number"
+                      step="0.01"
                       value={item.rate || ''}
                       onChange={e => setRow(idx, r => ({ ...r, rate: Number(e.target.value || 0) }))}
                       onKeyDown={e => handleKeyDown(e, idx, 7)}
                       className="w-full px-1 py-0.5 text-[10px] text-right font-bold text-green-700 border-0 outline-none focus:bg-yellow-50"
                     />
                   </td>
-                  <td className="px-1 py-0.5 border text-right">₹{item.grossAmt.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border text-right text-[10px] font-bold">{item.grossAmt.toFixed(2)}</td>
                   <td className="px-1 py-0.5 border">
                     <input
                       ref={el => inputRefs.current[`${idx}-cgstPercent`] = el}
-                      type="number" step="0.1"
-                      value={item.cgstPercent}
+                      type="number"
+                      step="0.1"
+                      value={item.cgstPercent || ''}
                       onChange={e => setRow(idx, r => ({ ...r, cgstPercent: Number(e.target.value || 0) }))}
                       onKeyDown={e => handleKeyDown(e, idx, 8)}
                       className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
                     />
                   </td>
-                  <td className="px-1 py-0.5 border text-right text-blue-700">₹{item.cgstAmt.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border text-right text-[10px] text-amber-600">{item.cgstAmt.toFixed(2)}</td>
                   <td className="px-1 py-0.5 border">
                     <input
                       ref={el => inputRefs.current[`${idx}-sgstPercent`] = el}
-                      type="number" step="0.1"
-                      value={item.sgstPercent}
+                      type="number"
+                      step="0.1"
+                      value={item.sgstPercent || ''}
                       onChange={e => setRow(idx, r => ({ ...r, sgstPercent: Number(e.target.value || 0) }))}
                       onKeyDown={e => handleKeyDown(e, idx, 9)}
                       className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
                     />
                   </td>
-                  <td className="px-1 py-0.5 border text-right text-blue-700">₹{item.sgstAmt.toFixed(2)}</td>
-                  <td className="px-1 py-0.5 border text-right font-bold text-purple-700">₹{item.total.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border text-right text-[10px] text-amber-600">{item.sgstAmt.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border text-right text-[10px] font-bold text-indigo-700">{item.total.toFixed(2)}</td>
                   <td className="px-1 py-0.5 border text-center">
-                    <button onClick={() => removeRow(idx)} className="text-red-600 hover:bg-red-100 px-1 rounded text-xs">🗑</button>
+                    {items.length > 1 && (
+                      <button
+                        onClick={() => removeRow(idx)}
+                        className="px-1 py-0.5 text-[9px] bg-red-500 text-white rounded hover:bg-red-600"
+                      >
+                        ✕
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -1033,30 +1111,58 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
           </table>
         </div>
 
-        {/* Bottom bar */}
-        <div className="bg-white border-t px-4 py-2 flex items-center justify-between">
-          <button onClick={addRow} className="px-3 py-1.5 bg-slate-600 text-white rounded text-[11px] font-semibold hover:bg-slate-700">+ Add Row (Enter)</button>
+        <div className="p-3 bg-slate-100 border-t flex items-center justify-between">
+          <div className="flex space-x-2">
+            <button onClick={addRow} className="px-3 py-1.5 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 font-semibold">
+              + Add Row
+            </button>
+            <button onClick={clearAll} className="px-3 py-1.5 text-xs bg-gray-500 text-white rounded hover:bg-gray-600 font-semibold">
+              Clear All
+            </button>
+          </div>
 
-          <div className="flex items-center space-x-4 text-[11px]">
-            <div><span className="text-slate-600">Total Qty:</span> <span className="font-bold text-sm">{totals.totalQty}</span></div>
-            <div><span className="text-slate-600">CGST:</span> <span className="font-semibold text-blue-700">₹{totals.totalCgst.toFixed(2)}</span></div>
-            <div><span className="text-slate-600">SGST:</span> <span className="font-semibold text-blue-700">₹{totals.totalSgst.toFixed(2)}</span></div>
-            <div><span className="text-slate-600">Saved:</span> <span className="font-semibold text-emerald-700">₹{totals.savedFromMrp.toFixed(2)}</span></div>
-            <div><span className="text-slate-600">Round:</span> <span className="font-semibold">{totals.roundOff >= 0 ? '+' : ''}₹{totals.roundOff.toFixed(2)}</span></div>
-            <div className="bg-indigo-50 px-3 py-1.5 rounded">
-              <span className="text-slate-600 font-bold mr-2">BILL AMOUNT</span>
-              <span className="font-bold text-indigo-700 text-lg">₹{totals.finalAmount.toFixed(2)}</span>
+          <div className="flex items-center space-x-6 text-xs">
+            <div className="text-right">
+              <p className="text-[10px] text-slate-600">Total Items</p>
+              <p className="text-lg font-bold text-blue-700">{items.filter(i => i.itemName).length}</p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] text-slate-600">Total Qty</p>
+              <p className="text-lg font-bold text-purple-700">{totals.totalQty}</p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] text-slate-600">Gross Total</p>
+              <p className="text-lg font-bold text-slate-700">₹{totals.grossTotal.toFixed(2)}</p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] text-slate-600">Total Tax</p>
+              <p className="text-lg font-bold text-amber-600">₹{totals.totalTax.toFixed(2)}</p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] text-slate-600">Bill Amount</p>
+              <p className="text-lg font-bold text-green-700">₹{totals.billAmount.toFixed(2)}</p>
+            </div>
+            {totals.discountPercent > 0 && (
+              <div className="text-right">
+                <p className="text-[10px] text-slate-600">Discount ({totals.discountPercent}%)</p>
+                <p className="text-lg font-bold text-blue-600">-₹{totals.discountAmount.toFixed(2)}</p>
+              </div>
+            )}
+            <div className="text-right bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-4 py-2 rounded-lg">
+              <p className="text-[10px]">FINAL AMOUNT</p>
+              <p className="text-2xl font-bold">₹{totals.finalAmount.toFixed(2)}</p>
             </div>
           </div>
 
-          <div className="flex items-center space-x-2">
-            <button onClick={clearAll} className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded text-[11px] font-semibold hover:bg-gray-300">Clear</button>
-            <button onClick={handleSave} className="px-4 py-1.5 bg-green-600 text-white rounded text-[11px] font-semibold hover:bg-green-700">Save & Print</button>
-          </div>
+          <button
+            onClick={handleSave}
+            className="px-6 py-2.5 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-lg font-bold hover:shadow-xl transition-all"
+          >
+            💾 SAVE & PREVIEW
+          </button>
         </div>
       </div>
 
-      {/* Product Search */}
       {openSearch && searchRow !== null && (
         <ProductSearchModal
           open={openSearch}
@@ -1064,26 +1170,74 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
           products={inv}
           pendingQty={pendingQty}
           onClose={() => setOpenSearch(false)}
-          onSelect={(picked) => { applyPickedToRow(searchRow, picked); setSearchRow(null); }}
+          onSelect={picked => applyPickedToRow(searchRow, picked)}
         />
       )}
 
-      {/* Toast */}
       {savedToast.show && (
-        <div className="fixed top-4 right-4 z-[100] bg-green-600 text-white px-4 py-3 rounded-lg shadow-2xl max-w-md">
-          <pre className="text-[10px] font-mono whitespace-pre-wrap">{savedToast.text}</pre>
+        <div className="fixed top-4 right-4 z-[90] bg-green-600 text-white px-6 py-4 rounded-lg shadow-2xl animate-slideInRight">
+          <p className="text-sm font-semibold whitespace-pre-line">{savedToast.text}</p>
         </div>
       )}
 
-      {/* Print preview */}
       {showPreview && (
-        <div className="fixed inset-0 z-[90] bg-black/80 flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-4xl h-[90vh] rounded-lg overflow-hidden shadow-2xl">
-            <div className="bg-slate-800 text-white px-4 py-2 flex justify-between items-center">
-              <h3 className="font-bold text-sm">Print Preview</h3>
-              <button onClick={() => setShowPreview(false)} className="px-3 py-1 bg-red-500 rounded text-xs hover:bg-red-600">Close</button>
+        <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[95vh] overflow-hidden flex flex-col">
+            
+            <div className="bg-gradient-to-r from-green-600 to-emerald-600 text-white px-6 py-4 flex items-center justify-between">
+              <div>
+                <h3 className="text-xl font-bold">📄 Bill Preview</h3>
+                <p className="text-sm text-white/80 mt-1">Invoice #{invoiceNo} • Review before printing</p>
+              </div>
+              <button 
+                onClick={handleClosePreview}
+                className="p-2 hover:bg-white/20 rounded-lg transition-all"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
             </div>
-            <iframe id="print-iframe" srcDoc={previewHTML} className="w-full h-full border-0" />
+
+            <div className="flex-1 overflow-auto bg-gray-100 p-4">
+              <div className="bg-white rounded-lg shadow-lg overflow-hidden">
+                <iframe
+                  id="print-iframe"
+                  srcDoc={previewHTML}
+                  className="w-full h-[calc(95vh-200px)] border-0"
+                  title="Invoice Preview"
+                />
+              </div>
+            </div>
+
+            <div className="px-6 py-4 bg-white border-t flex items-center justify-between">
+              <div className="text-sm text-slate-600">
+                <p className="font-semibold">✅ Invoice saved successfully!</p>
+                <p className="text-xs mt-1">Stock updated • Data synced</p>
+              </div>
+              
+              <div className="flex space-x-3">
+                <button
+                  onClick={handleClosePreview}
+                  className="px-6 py-2.5 bg-gray-500 text-white rounded-lg font-semibold hover:bg-gray-600 transition-all flex items-center space-x-2"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                  <span>Close</span>
+                </button>
+                
+                <button
+                  onClick={handlePrint}
+                  className="px-6 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg font-semibold hover:shadow-xl transition-all flex items-center space-x-2"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+                  </svg>
+                  <span>Print Bill</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
