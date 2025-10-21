@@ -1,5 +1,5 @@
 // src/services/salesDB.ts
-// COMPLETE IndexedDB-based Sales DB with safe upgrades, listing, returns, and reporting
+// COMPLETE IndexedDB-based Sales DB with safe upgrades, listing, deletion, returns, and reporting
 // ALL FUNCTIONS INCLUDED - PRODUCTION READY
 
 export type SaleInvoiceRecord = {
@@ -178,6 +178,24 @@ export async function saveInvoice(
     const addReq = st.add(payload);
     addReq.onsuccess = () => resolve({ id: addReq.result as number, invoiceNo });
     addReq.onerror = () => reject(addReq.error);
+  });
+}
+
+// ✅ DELETE INVOICE BY ID - THIS WAS MISSING
+export async function deleteInvoiceById(invoiceId: number): Promise<{ ok: boolean }> {
+  const db = await openSalesDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['invoices'], 'readwrite');
+    const st = tx.objectStore('invoices');
+    const deleteReq = st.delete(invoiceId);
+    deleteReq.onsuccess = () => {
+      console.log(`✅ Invoice ${invoiceId} deleted successfully`);
+      resolve({ ok: true });
+    };
+    deleteReq.onerror = () => {
+      console.error(`❌ Failed to delete invoice ${invoiceId}:`, deleteReq.error);
+      reject(deleteReq.error);
+    };
   });
 }
 
@@ -394,6 +412,31 @@ export type SalesReportRow = {
     profit?: number;
   };
 };
+
+/**
+ * 🗑️ CLEAR ALL SALES DATA - RESET DATABASE
+ * Deletes all invoices and resets to fresh state
+ */
+export async function clearSalesDatabase(): Promise<void> {
+  const db = await getDB();
+  
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('invoices', 'readwrite');
+    const store = tx.objectStore('invoices');
+    const request = store.clear();
+
+    request.onsuccess = () => {
+      console.log('✅ Sales Database Cleared Successfully');
+      resolve();
+    };
+
+    request.onerror = () => {
+      console.error('❌ Failed to clear Sales Database:', request.error);
+      reject(new Error(`Failed to clear sales database: ${request.error?.message}`));
+    };
+  });
+}
+
 
 export async function getSalesReport(fromISO: string, toISO: string, q?: string): Promise<SalesReportRow[]> {
   const list = await getInvoicesRange(fromISO, toISO, q || '');

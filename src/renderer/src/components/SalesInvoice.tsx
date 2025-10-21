@@ -1,10 +1,9 @@
 // src/components/SalesInvoice.tsx
-// COMPLETE FINAL CODE - NO GST IN FINAL AMOUNT, BLACK TEXT, 7 ROWS PER PAGE
+// PART 1: IMPORTS, TYPES, HELPERS & SMART RATE CALCULATION
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { saveInvoice } from '../services/salesDB';
 
-/***** Type Definitions *****/
 type InvProduct = {
   id: string;
   itemCode: string;
@@ -84,13 +83,33 @@ const nextInvoiceNo = (): string => {
   return String(n);
 };
 
-const calculateRateFromMRP = (mrp: number): number => {
-  const discountAmount = mrp * 0.12;
-  const rate = mrp - discountAmount;
-  return Number(rate.toFixed(2));
+const calculateRateFromMRP = (mrp: number, srate: number): number => {
+  const mrpRounded = Math.round(mrp * 100) / 100;
+  const srateRounded = Math.round(srate * 100) / 100;
+  
+  const discount12 = Math.round((mrpRounded * 0.12) * 100) / 100;
+  const discount18 = Math.round((mrpRounded * 0.18) * 100) / 100;
+  const discount5 = Math.round((mrpRounded * 0.05) * 100) / 100;
+  
+  const srate12 = Math.round((mrpRounded - discount12) * 100) / 100;
+  const srate18 = Math.round((mrpRounded - discount18) * 100) / 100;
+  const srate5 = Math.round((mrpRounded - discount5) * 100) / 100;
+  
+  const tolerance = 0.5;
+  
+  if (Math.abs(srateRounded - srate12) <= tolerance) {
+    const rate12 = Math.round((srate12 - (srate12 * 0.07)) * 100) / 100;
+    return rate12;
+  } else if (Math.abs(srateRounded - srate18) <= tolerance) {
+    const rate18 = Math.round((srate18 - (srate18 * 0.13)) * 100) / 100;
+    return rate18;
+  } else if (Math.abs(srateRounded - srate5) <= tolerance) {
+    return Math.round(srate5 * 100) / 100;
+  } else {
+    return Math.round(srateRounded * 100) / 100;
+  }
 };
 
-/***** Product Search Modal *****/
 function ProductSearchModal({
   open,
   prefix,
@@ -153,13 +172,15 @@ function ProductSearchModal({
       .map(p => {
         const k = keyFor(p.itemCode || '', p.batch || '');
         const avail = Math.max(0, Number(p.stockQuantity || 0) - Number(pendingQty[k] || 0));
-        const mrpN = Number(p.mrp || 0);
-        const rateN = calculateRateFromMRP(mrpN);
+        const mrpN = Math.round(Number(p.mrp || 0) * 100) / 100;
+        const srateN = Math.round(Number(p.sellingPriceTab || 0) * 100) / 100;
+        const rateN = calculateRateFromMRP(mrpN, srateN);
         return {
           ...p,
           batch: p.batch || '-',
           expiry: MMYY(p.expiryDate || ''),
           mrpN,
+          srateN,
           rateN,
           cgstN: Number(p.cgstRate || 0),
           sgstN: Number(p.sgstRate || 0),
@@ -243,7 +264,7 @@ function ProductSearchModal({
       >
         <div className="px-3 py-2 bg-indigo-600 text-white flex items-center justify-between">
           <h3 className="text-sm font-bold">Product Search</h3>
-          <div className="text-[10px] text-white/80">Keep typing • Arrows • Enter • Esc</div>
+          <div className="text-[10px] text-white/80">Arrows • Enter • Esc</div>
         </div>
 
         <div className="p-3 grid grid-cols-5 gap-3">
@@ -309,12 +330,12 @@ function ProductSearchModal({
                     <th className="px-2 py-1 text-left">Batch</th>
                     <th className="px-2 py-1 text-center">Exp</th>
                     <th className="px-2 py-1 text-right">MRP</th>
+                    <th className="px-2 py-1 text-right">SRate</th>
                     <th className="px-2 py-1 text-right">Rate</th>
                     <th className="px-2 py-1 text-center">CGST</th>
                     <th className="px-2 py-1 text-center">SGST</th>
                     <th className="px-2 py-1 text-center">Pack</th>
                     <th className="px-2 py-1 text-center">Stock</th>
-                    <th className="px-2 py-1 text-center">Pick</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -331,12 +352,12 @@ function ProductSearchModal({
                         <td className="px-2 py-1 font-mono">{b.batch}</td>
                         <td className="px-2 py-1 text-center text-purple-700">{b.expiry}</td>
                         <td className="px-2 py-1 text-right">₹{b.mrpN.toFixed(2)}</td>
+                        <td className="px-2 py-1 text-right text-blue-700">₹{b.srateN.toFixed(2)}</td>
                         <td className="px-2 py-1 text-right font-bold text-green-700">₹{b.rateN.toFixed(2)}</td>
                         <td className="px-2 py-1 text-center">{b.cgstN}%</td>
                         <td className="px-2 py-1 text-center">{b.sgstN}%</td>
                         <td className="px-2 py-1 text-center">{b.packN}</td>
                         <td className="px-2 py-1 text-center font-bold text-blue-700">{b.stockN}</td>
-                        <td className="px-2 py-1 text-center text-[10px] text-slate-500">Enter</td>
                       </tr>
                     );
                   })}
@@ -359,7 +380,6 @@ function ProductSearchModal({
   );
 }
 
-/***** Main Component *****/
 export default function SalesInvoice({ onClose }: { onClose: () => void }) {
   const [invoiceNo, setInvoiceNo] = useState(nextInvoiceNo());
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
@@ -410,38 +430,32 @@ export default function SalesInvoice({ onClose }: { onClose: () => void }) {
     }
   };
   useEffect(() => { loadInventory(); }, []);
-// ✅ UPDATED calcRow function - REVERSE GST CALCULATION
-const calcRow = (r: InvoiceItem): InvoiceItem => {
-  const rate = r.rate || 0;
-  const qty = r.quantity || 0;
-  
-  // Total INCLUDES GST (Rate × Qty is the final selling price with GST)
-  const totalWithGST = qty * rate;
-  
-  // Calculate GST percentage
-  const cgstPercent = r.cgstPercent || 0;
-  const sgstPercent = r.sgstPercent || 0;
-  const totalGSTPercent = cgstPercent + sgstPercent;
-  
-  // Reverse calculate: Remove GST to get taxable value
-  // Formula: Taxable = Total ÷ (1 + GST%)
-  const taxableValue = totalGSTPercent > 0 
-    ? totalWithGST / (1 + (totalGSTPercent / 100))
-    : totalWithGST;
-  
-  // Calculate GST amounts from taxable value
-  const cgstAmt = (taxableValue * cgstPercent) / 100;
-  const sgstAmt = (taxableValue * sgstPercent) / 100;
-  
-  return {
-    ...r,
-    grossAmt: Number(taxableValue.toFixed(2)),      // ✅ Taxable value (GST removed)
-    cgstAmt: Number(cgstAmt.toFixed(2)),            // ✅ CGST amount
-    sgstAmt: Number(sgstAmt.toFixed(2)),            // ✅ SGST amount
-    total: Number(totalWithGST.toFixed(2)),         // ✅ Final amount (with GST)
-  };
-};
 
+  const calcRow = (r: InvoiceItem): InvoiceItem => {
+    const rate = Math.round(Number(r.rate || 0) * 100) / 100;
+    const qty = Number(r.quantity || 0);
+    
+    const totalWithGST = Math.round(qty * rate * 100) / 100;
+    
+    const cgstPercent = Number(r.cgstPercent || 0);
+    const sgstPercent = Number(r.sgstPercent || 0);
+    const totalGSTPercent = cgstPercent + sgstPercent;
+    
+    const taxableValue = totalGSTPercent > 0 
+      ? Math.round((totalWithGST / (1 + (totalGSTPercent / 100))) * 100) / 100
+      : totalWithGST;
+    
+    const cgstAmt = Math.round((taxableValue * cgstPercent) / 100 * 100) / 100;
+    const sgstAmt = Math.round((taxableValue * sgstPercent) / 100 * 100) / 100;
+    
+    return {
+      ...r,
+      grossAmt: taxableValue,
+      cgstAmt,
+      sgstAmt,
+      total: totalWithGST,
+    };
+  };
 
   const setRow = (idx: number, updater: (row: InvoiceItem) => InvoiceItem) => {
     setItems(prev => {
@@ -454,8 +468,8 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
   const mergeIntoExistingRow = (picked: PickedRow): number | null => {
     const code = picked.product.itemCode || '';
     const batch = picked.batch || '';
-    const rate = picked.rate || 0;
-    const idx = items.findIndex(r => r.itemCode === code && r.batch === batch && r.rate === rate);
+    const rate = Math.round(Number(picked.rate || 0) * 100) / 100;
+    const idx = items.findIndex(r => r.itemCode === code && r.batch === batch && Math.round(Number(r.rate || 0) * 100) / 100 === rate);
     if (idx >= 0) {
       setRow(idx, r => ({ ...r, quantity: (r.quantity || 0) + (picked.quantity || 1) }));
       return idx;
@@ -491,8 +505,8 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
       batch: picked.batch || '',
       expiryDate: picked.expiryDate || '',
       pack: picked.pack || 1,
-      mrp: picked.mrp || 0,
-      rate: picked.rate || 0,
+      mrp: Math.round(Number(picked.mrp || 0) * 100) / 100,
+      rate: Math.round(Number(picked.rate || 0) * 100) / 100,
       cgstPercent: picked.cgstPercent ?? 0,
       sgstPercent: picked.sgstPercent ?? 0,
       quantity: picked.quantity || 1,
@@ -567,30 +581,30 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
 
   const totals = useMemo(() => {
     const totalQty = items.reduce((s, r) => s + (r.quantity || 0), 0);
-    const grossTotal = items.reduce((s, r) => s + (r.grossAmt || 0), 0);
-    const totalCgst = items.reduce((s, r) => s + (r.cgstAmt || 0), 0);
-    const totalSgst = items.reduce((s, r) => s + (r.sgstAmt || 0), 0);
-    const billAmount = items.reduce((s, r) => s + (r.total || 0), 0);
-    const savedFromMrp = items.reduce((s, r) => s + Math.max(0, (r.mrp - r.rate)) * (r.quantity || 0), 0);
+    const grossTotal = Math.round(items.reduce((s, r) => s + (r.grossAmt || 0), 0) * 100) / 100;
+    const totalCgst = Math.round(items.reduce((s, r) => s + (r.cgstAmt || 0), 0) * 100) / 100;
+    const totalSgst = Math.round(items.reduce((s, r) => s + (r.sgstAmt || 0), 0) * 100) / 100;
+    const billAmount = Math.round(items.reduce((s, r) => s + (r.total || 0), 0) * 100) / 100;
+    const savedFromMrp = Math.round(items.reduce((s, r) => s + Math.max(0, (r.mrp - r.rate)) * (r.quantity || 0), 0) * 100) / 100;
     
-    const discountAmount = Number(((billAmount * (discountPercent || 0)) / 100).toFixed(2));
-    const afterDiscount = Number((billAmount - discountAmount).toFixed(2));
-    const roundOff = Number((Math.round(afterDiscount) - afterDiscount).toFixed(2));
+    const discountAmount = Math.round((billAmount * (discountPercent || 0)) / 100 * 100) / 100;
+    const afterDiscount = Math.round((billAmount - discountAmount) * 100) / 100;
+    const roundOff = Math.round((Math.round(afterDiscount) - afterDiscount) * 100) / 100;
     const finalAmount = Math.round(afterDiscount);
     
     return {
       totalQty,
-      grossTotal: Number(grossTotal.toFixed(2)),
-      totalCgst: Number(totalCgst.toFixed(2)),
-      totalSgst: Number(totalSgst.toFixed(2)),
-      totalTax: Number((totalCgst + totalSgst).toFixed(2)),
-      billAmount: Number(billAmount.toFixed(2)),
+      grossTotal,
+      totalCgst,
+      totalSgst,
+      totalTax: Math.round((totalCgst + totalSgst) * 100) / 100,
+      billAmount,
       discountPercent: discountPercent || 0,
       discountAmount,
       afterDiscount,
       roundOff,
       finalAmount,
-      savedFromMrp: Number(savedFromMrp.toFixed(2))
+      savedFromMrp
     };
   }, [items, discountPercent]);
 
@@ -606,12 +620,10 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
     const rates = [5, 12, 18, 28];
     return rates.map(rate => ({
       rate,
-      taxable: Number((map.get(rate)?.taxable || 0).toFixed(2)),
-      taxAmt: Number((map.get(rate)?.taxAmt || 0).toFixed(2)),
+      taxable: Math.round((map.get(rate)?.taxable || 0) * 100) / 100,
+      taxAmt: Math.round((map.get(rate)?.taxAmt || 0) * 100) / 100,
     }));
   }, [items]);
-
-  /***** Printing - 7 ROWS PER PAGE *****/
   const PAGE_ROWS = 7;
 
   const splitPages = (rows: InvoiceItem[], pageSize = PAGE_ROWS) => {
@@ -660,55 +672,47 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
       th { text-align:center; }
       td.right { text-align:right; }
       td.center { text-align:center; }
-      .gstbox { width:100%; border:1px solid #000; border-top:none; padding:6px; }
-      .row { display:flex; justify-content:space-between; margin-top:6px; }
-      .small { font-size:9px; }
-      .saved { font-weight:bold; }
-      .summary { 
-        margin-left:auto; 
-        width:260px; 
-        background:#f9fafb; 
-        border:2px solid #000; 
-        padding:10px; 
-        border-radius:4px;
-        margin-right:10px;
+      .footer { width:100%; border:1px solid #000; border-top:none; padding:6px; }
+      .footer-row { display:flex; justify-content:space-between; margin-top:6px; }
+      .gst-table { font-size:9px; width:45%; }
+      .totals-box { 
+        width:50%; 
+        text-align:right;
       }
-      .summary-line {
+      .totals-line {
         display:flex;
         justify-content:space-between;
         padding:3px 0;
-        color:#000;
         font-size:10px;
       }
-      .summary-total {
+      .totals-final {
         display:flex;
         justify-content:space-between;
-        padding:8px 0;
-        margin-top:6px;
+        padding:6px 0;
+        margin-top:4px;
         border-top:2px solid #000;
         font-weight:bold;
-        font-size:14px;
-        color:#000;
+        font-size:12px;
       }
       .signature { text-align:right; margin-top:10px; font-size:10px; }
       .pb { page-break-after: always; }
     `;
 
     const gstTable = `
-      <table class="small" style="width:50%; margin-top:6px;">
+      <table class="gst-table" style="border-collapse:collapse;">
         <thead>
           <tr>
-            <th style="width:70px;">GST %</th>
-            <th>Taxable</th>
-            <th>GST AMT</th>
+            <th style="border:1px solid #000; padding:4px; width:60px;">GST %</th>
+            <th style="border:1px solid #000; padding:4px;">Taxable</th>
+            <th style="border:1px solid #000; padding:4px;">GST AMT</th>
           </tr>
         </thead>
         <tbody>
           ${gstSummary.map(g => `
             <tr>
-              <td>${g.rate}%</td>
-              <td class="right">${g.taxable.toFixed(2)}</td>
-              <td class="right">${g.taxAmt.toFixed(2)}</td>
+              <td style="border:1px solid #000; padding:4px; text-align:center;">${g.rate}%</td>
+              <td style="border:1px solid #000; padding:4px; text-align:right;">${g.taxable.toFixed(2)}</td>
+              <td style="border:1px solid #000; padding:4px; text-align:right;">${g.taxAmt.toFixed(2)}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -791,23 +795,29 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
           </div>
 
           ${lastPage ? `
-          <div class="gstbox">
-            <div class="row">
-              <div style="width:45%;">${gstTable}</div>
-              <div class="summary">
-                <div class="summary-line">
+          <div class="footer">
+            <div class="footer-row">
+              ${gstTable}
+              <div class="totals-box">
+                <div class="totals-line">
                   <span>Sub Total:</span>
                   <strong>₹${totals.billAmount.toFixed(2)}</strong>
                 </div>
-                <div class="summary-line">
-                  <span>Round Off:</span>
-                  <strong>${totals.roundOff >= 0 ? '' : '-'}₹${Math.abs(totals.roundOff).toFixed(2)}</strong>
+                ${totals.discountPercent > 0 ? `
+                <div class="totals-line">
+                  <span>Discount (${totals.discountPercent}%):</span>
+                  <strong>- ₹${totals.discountAmount.toFixed(2)}</strong>
                 </div>
-                <div class="summary-line" style="margin-top:4px; padding-top:4px; border-top:1px solid #ccc;">
-                  <span>Total Saved (MRP):</span>
+                ` : ''}
+                <div class="totals-line">
+                  <span>Round Off:</span>
+                  <strong>${totals.roundOff >= 0 ? '+' : ''}₹${totals.roundOff.toFixed(2)}</strong>
+                </div>
+                <div class="totals-line" style="border-top:1px solid #ccc; padding-top:4px; margin-top:4px;">
+                  <span>Saved (MRP):</span>
                   <strong style="color:#059669;">₹${totals.savedFromMrp.toFixed(2)}</strong>
                 </div>
-                <div class="summary-total">
+                <div class="totals-final">
                   <span>Bill Amount:</span>
                   <strong>₹${totals.finalAmount.toFixed(2)}</strong>
                 </div>
@@ -833,7 +843,6 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
     `;
   };
 
-  /***** Save & Print WITH PREVIEW *****/
   const handleSave = async () => {
     const pickedItems = items.filter(i => i.itemName && i.quantity > 0);
     if (pickedItems.length === 0) {
@@ -902,7 +911,6 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
     setInvoiceNo(nextInvoiceNo());
   };
 
-  /***** UI *****/
   return (
     <>
       <div className="fixed inset-0 bg-white z-50 overflow-hidden flex flex-col">
@@ -1014,7 +1022,7 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
                       value={item.batch}
                       onChange={e => setRow(idx, r => ({ ...r, batch: e.target.value }))}
                       onKeyDown={e => handleKeyDown(e, idx, 2)}
-                      className="w-full px-1 py-0.5 text-[10px] font-mono text-center border-0 outline-none focus:bg-yellow-50"
+                      className="w-full px-1 py-0.5 text-[10px] font-mono border-0 outline-none focus:bg-yellow-50"
                     />
                   </td>
                   <td className="px-1 py-0.5 border">
@@ -1023,7 +1031,7 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
                       value={item.expiryDate}
                       onChange={e => setRow(idx, r => ({ ...r, expiryDate: e.target.value }))}
                       onKeyDown={e => handleKeyDown(e, idx, 3)}
-                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50 text-purple-700"
                       placeholder="MM/YY"
                     />
                   </td>
@@ -1031,17 +1039,19 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
                     <input
                       ref={el => inputRefs.current[`${idx}-quantity`] = el}
                       type="number"
+                      min="0"
                       value={item.quantity || ''}
                       onChange={e => setRow(idx, r => ({ ...r, quantity: Number(e.target.value || 0) }))}
                       onKeyDown={e => handleKeyDown(e, idx, 4)}
-                      className="w-full px-1 py-0.5 text-[10px] text-center font-bold border-0 outline-none focus:bg-yellow-50"
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50 font-bold"
                     />
                   </td>
                   <td className="px-1 py-0.5 border">
                     <input
                       ref={el => inputRefs.current[`${idx}-pack`] = el}
                       type="number"
-                      value={item.pack}
+                      min="1"
+                      value={item.pack || ''}
                       onChange={e => setRow(idx, r => ({ ...r, pack: Number(e.target.value || 1) }))}
                       onKeyDown={e => handleKeyDown(e, idx, 5)}
                       className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
@@ -1051,6 +1061,7 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
                     <input
                       ref={el => inputRefs.current[`${idx}-mrp`] = el}
                       type="number"
+                      min="0"
                       step="0.01"
                       value={item.mrp || ''}
                       onChange={e => setRow(idx, r => ({ ...r, mrp: Number(e.target.value || 0) }))}
@@ -1062,18 +1073,20 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
                     <input
                       ref={el => inputRefs.current[`${idx}-rate`] = el}
                       type="number"
+                      min="0"
                       step="0.01"
                       value={item.rate || ''}
                       onChange={e => setRow(idx, r => ({ ...r, rate: Number(e.target.value || 0) }))}
                       onKeyDown={e => handleKeyDown(e, idx, 7)}
-                      className="w-full px-1 py-0.5 text-[10px] text-right font-bold text-green-700 border-0 outline-none focus:bg-yellow-50"
+                      className="w-full px-1 py-0.5 text-[10px] text-right border-0 outline-none focus:bg-yellow-50 font-bold text-green-700"
                     />
                   </td>
-                  <td className="px-1 py-0.5 border text-right text-[10px] font-bold">{item.grossAmt.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border text-right text-[9px]">{item.grossAmt.toFixed(2)}</td>
                   <td className="px-1 py-0.5 border">
                     <input
                       ref={el => inputRefs.current[`${idx}-cgstPercent`] = el}
                       type="number"
+                      min="0"
                       step="0.1"
                       value={item.cgstPercent || ''}
                       onChange={e => setRow(idx, r => ({ ...r, cgstPercent: Number(e.target.value || 0) }))}
@@ -1081,11 +1094,12 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
                       className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
                     />
                   </td>
-                  <td className="px-1 py-0.5 border text-right text-[10px] text-amber-600">{item.cgstAmt.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border text-right text-[9px]">{item.cgstAmt.toFixed(2)}</td>
                   <td className="px-1 py-0.5 border">
                     <input
                       ref={el => inputRefs.current[`${idx}-sgstPercent`] = el}
                       type="number"
+                      min="0"
                       step="0.1"
                       value={item.sgstPercent || ''}
                       onChange={e => setRow(idx, r => ({ ...r, sgstPercent: Number(e.target.value || 0) }))}
@@ -1093,17 +1107,10 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
                       className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
                     />
                   </td>
-                  <td className="px-1 py-0.5 border text-right text-[10px] text-amber-600">{item.sgstAmt.toFixed(2)}</td>
-                  <td className="px-1 py-0.5 border text-right text-[10px] font-bold text-indigo-700">{item.total.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border text-right text-[9px]">{item.sgstAmt.toFixed(2)}</td>
+                  <td className="px-1 py-0.5 border text-right font-bold text-[10px]">{item.total.toFixed(2)}</td>
                   <td className="px-1 py-0.5 border text-center">
-                    {items.length > 1 && (
-                      <button
-                        onClick={() => removeRow(idx)}
-                        className="px-1 py-0.5 text-[9px] bg-red-500 text-white rounded hover:bg-red-600"
-                      >
-                        ✕
-                      </button>
-                    )}
+                    <button onClick={() => removeRow(idx)} className="text-red-600 hover:text-red-800 text-xs">×</button>
                   </td>
                 </tr>
               ))}
@@ -1111,136 +1118,64 @@ const calcRow = (r: InvoiceItem): InvoiceItem => {
           </table>
         </div>
 
-        <div className="p-3 bg-slate-100 border-t flex items-center justify-between">
+        <div className="bg-slate-50 border-t px-4 py-3 flex items-center justify-between">
           <div className="flex space-x-2">
-            <button onClick={addRow} className="px-3 py-1.5 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 font-semibold">
-              + Add Row
-            </button>
-            <button onClick={clearAll} className="px-3 py-1.5 text-xs bg-gray-500 text-white rounded hover:bg-gray-600 font-semibold">
-              Clear All
-            </button>
+            <button onClick={addRow} className="px-3 py-1.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">+ Add Row</button>
+            <button onClick={clearAll} className="px-3 py-1.5 bg-gray-500 text-white rounded text-xs hover:bg-gray-600">Clear All</button>
           </div>
-
-          <div className="flex items-center space-x-6 text-xs">
+          <div className="flex items-center space-x-4 text-[11px]">
             <div className="text-right">
-              <p className="text-[10px] text-slate-600">Total Items</p>
-              <p className="text-lg font-bold text-blue-700">{items.filter(i => i.itemName).length}</p>
+              <div className="font-semibold">Taxable: ₹{totals.grossTotal.toFixed(2)}</div>
+              <div className="text-xs text-slate-600">GST: ₹{totals.totalTax.toFixed(2)}</div>
             </div>
             <div className="text-right">
-              <p className="text-[10px] text-slate-600">Total Qty</p>
-              <p className="text-lg font-bold text-purple-700">{totals.totalQty}</p>
+              <div className="font-semibold">Bill Amt: ₹{totals.billAmount.toFixed(2)}</div>
+              <div className="text-xs text-emerald-600">Saved: ₹{totals.savedFromMrp.toFixed(2)}</div>
             </div>
             <div className="text-right">
-              <p className="text-[10px] text-slate-600">Gross Total</p>
-              <p className="text-lg font-bold text-slate-700">₹{totals.grossTotal.toFixed(2)}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[10px] text-slate-600">Total Tax</p>
-              <p className="text-lg font-bold text-amber-600">₹{totals.totalTax.toFixed(2)}</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[10px] text-slate-600">Bill Amount</p>
-              <p className="text-lg font-bold text-green-700">₹{totals.billAmount.toFixed(2)}</p>
-            </div>
-            {totals.discountPercent > 0 && (
-              <div className="text-right">
-                <p className="text-[10px] text-slate-600">Discount ({totals.discountPercent}%)</p>
-                <p className="text-lg font-bold text-blue-600">-₹{totals.discountAmount.toFixed(2)}</p>
-              </div>
-            )}
-            <div className="text-right bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-4 py-2 rounded-lg">
-              <p className="text-[10px]">FINAL AMOUNT</p>
-              <p className="text-2xl font-bold">₹{totals.finalAmount.toFixed(2)}</p>
+              <div className="text-lg font-bold text-indigo-700">Final: ₹{totals.finalAmount.toFixed(2)}</div>
+              <div className="text-xs text-slate-600">Round: {totals.roundOff >= 0 ? '+' : ''}₹{totals.roundOff.toFixed(2)}</div>
             </div>
           </div>
-
-          <button
-            onClick={handleSave}
-            className="px-6 py-2.5 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-lg font-bold hover:shadow-xl transition-all"
-          >
-            💾 SAVE & PREVIEW
+          <button onClick={handleSave} className="px-6 py-2.5 bg-gradient-to-r from-green-600 to-emerald-600 text-white rounded-lg font-bold hover:shadow-lg">
+            💾 Save & Preview
           </button>
         </div>
       </div>
 
-      {openSearch && searchRow !== null && (
-        <ProductSearchModal
-          open={openSearch}
-          prefix={searchPrefix}
-          products={inv}
-          pendingQty={pendingQty}
-          onClose={() => setOpenSearch(false)}
-          onSelect={picked => applyPickedToRow(searchRow, picked)}
-        />
-      )}
-
       {savedToast.show && (
-        <div className="fixed top-4 right-4 z-[90] bg-green-600 text-white px-6 py-4 rounded-lg shadow-2xl animate-slideInRight">
-          <p className="text-sm font-semibold whitespace-pre-line">{savedToast.text}</p>
+        <div className="fixed top-4 right-4 z-[90] bg-green-600 text-white px-6 py-3 rounded-lg shadow-2xl max-w-md">
+          <pre className="text-xs whitespace-pre-wrap font-mono">{savedToast.text}</pre>
         </div>
       )}
 
       {showPreview && (
-        <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[95vh] overflow-hidden flex flex-col">
-            
-            <div className="bg-gradient-to-r from-green-600 to-emerald-600 text-white px-6 py-4 flex items-center justify-between">
-              <div>
-                <h3 className="text-xl font-bold">📄 Bill Preview</h3>
-                <p className="text-sm text-white/80 mt-1">Invoice #{invoiceNo} • Review before printing</p>
-              </div>
-              <button 
-                onClick={handleClosePreview}
-                className="p-2 hover:bg-white/20 rounded-lg transition-all"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-auto bg-gray-100 p-4">
-              <div className="bg-white rounded-lg shadow-lg overflow-hidden">
-                <iframe
-                  id="print-iframe"
-                  srcDoc={previewHTML}
-                  className="w-full h-[calc(95vh-200px)] border-0"
-                  title="Invoice Preview"
-                />
+        <div className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-5xl h-[90vh] rounded-lg shadow-2xl overflow-hidden flex flex-col">
+            <div className="bg-gradient-to-r from-slate-800 to-indigo-900 text-white px-4 py-3 flex items-center justify-between">
+              <h3 className="text-lg font-bold">Invoice Preview</h3>
+              <div className="flex space-x-2">
+                <button onClick={handlePrint} className="px-4 py-2 bg-blue-600 rounded text-sm hover:bg-blue-700">🖨️ Print</button>
+                <button onClick={handleClosePreview} className="px-4 py-2 bg-gray-600 rounded text-sm hover:bg-gray-700">✕ Close</button>
               </div>
             </div>
-
-            <div className="px-6 py-4 bg-white border-t flex items-center justify-between">
-              <div className="text-sm text-slate-600">
-                <p className="font-semibold">✅ Invoice saved successfully!</p>
-                <p className="text-xs mt-1">Stock updated • Data synced</p>
-              </div>
-              
-              <div className="flex space-x-3">
-                <button
-                  onClick={handleClosePreview}
-                  className="px-6 py-2.5 bg-gray-500 text-white rounded-lg font-semibold hover:bg-gray-600 transition-all flex items-center space-x-2"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                  <span>Close</span>
-                </button>
-                
-                <button
-                  onClick={handlePrint}
-                  className="px-6 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg font-semibold hover:shadow-xl transition-all flex items-center space-x-2"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
-                  </svg>
-                  <span>Print Bill</span>
-                </button>
-              </div>
+            <div className="flex-1 overflow-auto bg-gray-100">
+              <iframe id="print-iframe" srcDoc={previewHTML} className="w-full h-full border-0" />
             </div>
           </div>
         </div>
       )}
+
+      <ProductSearchModal
+        open={openSearch}
+        prefix={searchPrefix}
+        products={inv}
+        pendingQty={pendingQty}
+        onClose={() => setOpenSearch(false)}
+        onSelect={(picked) => {
+          if (searchRow !== null) applyPickedToRow(searchRow, picked);
+        }}
+      />
     </>
   );
 }
