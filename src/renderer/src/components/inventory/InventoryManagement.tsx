@@ -1,9 +1,9 @@
 // src/components/inventory/InventoryManagement.tsx
-// Uses InventoryDB (SQLite) via window.inventory IPC API
-// 100% Accurate: Stock Value = SUM(Qty × SRate), Expired checked with TODAY, Low Stock = Qty ≤ ROL
+// Enhanced: Shows Purchase History + New Purchase Entry Button (Removed Daily Closing)
 
 import { useState, useEffect } from 'react';
 import StockImport from '../StockImport';
+import PurchaseInvoice from '../PurchaseInvoice'; // 🔥 Import Purchase Invoice Component
 
 /***** Type Definitions *****/
 interface Product {
@@ -48,7 +48,7 @@ interface InventoryStats {
   totalProducts: number;
   totalItems: number;
   totalQuantity: number;
-  totalStockValue: number; // SUM(qty × sellingPriceTab)
+  totalStockValue: number;
   totalCostValue: number;
   totalMRPValue: number;
   lowStockItems: number;
@@ -61,18 +61,61 @@ interface InventoryStats {
   invalidPricingCount: number;
 }
 
-interface DailyClosing {
-  date: string;
-  timestamp: number;
-  totalValue: number;
-  totalQuantity: number;
-  totalProducts: number;
-  lowStockCount: number;
-  outOfStockCount: number;
-  expiredCount: number;
+// 🔥 Purchase Invoice Record Type (from Purchase DB)
+interface PurchaseInvoiceRecord {
+  id: string;
+  invoiceNo: string;
+  header: {
+    invoiceDate: string;
+    dueDate: string;
+    orderDate: string;
+    lrNo: string;
+    lrDate: string;
+    cases: number;
+    transport: string;
+  };
+  party: {
+    name: string;
+    address: string;
+    phone: string;
+    gstin: string;
+    state: string;
+    stateCode: string;
+  };
+  items: Array<{
+    id: string;
+    slNo: number;
+    qty: number;
+    free: number;
+    mfr: string;
+    pack: number;
+    productName: string;
+    batch: string;
+    exp: string;
+    hsn: string;
+    mrp: number;
+    rate: number;
+    dis: number;
+    sgst: number;
+    sgstValue: number;
+    cgst: number;
+    cgstValue: number;
+    value: number;
+  }>;
+  totals: {
+    totalQty: number;
+    totalFree: number;
+    scheme: number;
+    discount: number;
+    sgst: number;
+    cgst: number;
+    totalGST: number;
+    total: number;
+  };
+  createdAt: string;
 }
 
-// Declare window.inventory API (from preload.ts → InventoryDB)
+// 🔥 Declare window APIs
 declare global {
   interface Window {
     inventory?: {
@@ -85,6 +128,10 @@ declare global {
       search: (query: string) => Promise<Product[]>;
       getCategories: () => Promise<string[]>;
     };
+    purchase?: {
+      getAll: () => Promise<PurchaseInvoiceRecord[]>;
+      getByProduct: (itemCode: string, batch: string) => Promise<PurchaseInvoiceRecord[]>;
+    };
   }
 }
 
@@ -95,7 +142,7 @@ export default function InventoryManagement() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showStockImport, setShowStockImport] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [showPurchaseInvoice, setShowPurchaseInvoice] = useState(false); // 🔥 New state for purchase invoice
   
   // Filters
   const [filterCategory, setFilterCategory] = useState('all');
@@ -104,11 +151,7 @@ export default function InventoryManagement() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   
-  // Daily Closing Filters
-  const [closingDateFrom, setClosingDateFrom] = useState('');
-  const [closingDateTo, setClosingDateTo] = useState('');
-  
-  // 🔥 CLIENT-SIDE CALCULATED STATS (100% accurate from ALL products)
+  // Stats
   const [inventoryStats, setInventoryStats] = useState<InventoryStats>({
     totalProducts: 0,
     totalItems: 0,
@@ -126,50 +169,32 @@ export default function InventoryManagement() {
     invalidPricingCount: 0
   });
 
-  const [dailyClosings, setDailyClosings] = useState<DailyClosing[]>([]);
-  const [filteredClosings, setFilteredClosings] = useState<DailyClosing[]>([]);
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  // 🔥 Purchase history for selected product
+  const [purchaseHistory, setPurchaseHistory] = useState<PurchaseInvoiceRecord[]>([]);
+  const [showPurchaseHistory, setShowPurchaseHistory] = useState(false);
 
-  // Pagination
-  const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 10;
-
-  // 🔥 Categorized product sets for accurate filtering
+  // Categorized product sets
   const [lowStockProducts, setLowStockProducts] = useState<Set<string>>(new Set());
   const [outOfStockProducts, setOutOfStockProducts] = useState<Set<string>>(new Set());
   const [expiredProducts, setExpiredProducts] = useState<Set<string>>(new Set());
   const [expiringProducts, setExpiringProducts] = useState<Set<string>>(new Set());
   const [invalidPricingProducts, setInvalidPricingProducts] = useState<Set<string>>(new Set());
 
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
+
   useEffect(() => {
     fetchData();
-    loadDailyClosings();
-    
-    // Auto-save at midnight
-    const now = new Date();
-    const tomorrow = new Date(now);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    tomorrow.setHours(0, 0, 0, 0);
-    const timeUntilMidnight = tomorrow.getTime() - now.getTime();
-    
-    const midnightTimeout = setTimeout(() => {
-      autoSaveDailyClosing();
-      const dailyInterval = setInterval(autoSaveDailyClosing, 24 * 60 * 60 * 1000);
-      return () => clearInterval(dailyInterval);
-    }, timeUntilMidnight);
-
-    return () => clearTimeout(midnightTimeout);
   }, []);
 
   useEffect(() => {
     filterProducts();
   }, [searchTerm, products, filterCategory, filterManufacturer, filterStockStatus, dateFrom, dateTo]);
 
-  useEffect(() => {
-    filterClosings();
-  }, [dailyClosings, closingDateFrom, closingDateTo]);
-
-  // 🔥 CRITICAL: Calculate 100% accurate stats from ALL products
+  // 🔥 Calculate accurate stats from ALL products
   const calculateAccurateStats = (allProducts: Product[]): InventoryStats => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -201,32 +226,25 @@ export default function InventoryManagement() {
       const mrp = Number(product.mrp) || 0;
       const rol = Number(product.rol) || 0;
 
-      // Total quantity
       totalQuantity += qty;
-
-      // 🔥 CRITICAL: Stock value = ONLY Quantity × SRate
       totalStockValue += qty * srate;
       totalCostValue += qty * prate;
       totalMRPValue += qty * mrp;
 
-      // Categories
       if (product.category) {
         categories.add(product.category);
       }
 
-      // 🔥 Low Stock: qty > 0 AND qty <= ROL
       if (qty > 0 && qty <= rol) {
         lowStockCount++;
         lowStockSet.add(product.id);
       }
 
-      // 🔥 Out of Stock: qty = 0
       if (qty === 0) {
         outOfStockCount++;
         outOfStockSet.add(product.id);
       }
 
-      // 🔥 Expired: hasExpiryDate AND expiryDate < TODAY
       if (product.hasExpiryDate && product.expiryDate) {
         const expiryDate = new Date(product.expiryDate);
         expiryDate.setHours(0, 0, 0, 0);
@@ -235,20 +253,17 @@ export default function InventoryManagement() {
           expiredCount++;
           expiredSet.add(product.id);
         } else if (expiryDate >= today && expiryDate <= thirtyDaysFromNow) {
-          // Expiring within 30 days (but not expired yet)
           expiringCount++;
           expiringSet.add(product.id);
         }
       }
 
-      // 🔥 Invalid Pricing: SRate > MRP (pricing error)
       if (srate > mrp && mrp > 0) {
         invalidPricingCount++;
         invalidPricingSet.add(product.id);
       }
     });
 
-    // Update state for filtering
     setLowStockProducts(lowStockSet);
     setOutOfStockProducts(outOfStockSet);
     setExpiredProducts(expiredSet);
@@ -278,30 +293,17 @@ export default function InventoryManagement() {
       setIsLoading(true);
       setError(null);
 
-      // 🔥 Check if window.inventory API is available
       if (!window.inventory) {
         throw new Error('Inventory API not available. Please restart the application.');
       }
 
-      // 🔥 Fetch ALL products from InventoryDB via IPC
       const allProducts = await window.inventory.getAll();
-      
-      // 🔥 Calculate accurate stats from ALL products (client-side)
       const accurateStats = calculateAccurateStats(allProducts);
 
       setProducts(allProducts);
       setInventoryStats(accurateStats);
 
-      console.log('📊 Accurate Inventory Stats (from ALL products):', {
-        totalProducts: accurateStats.totalProducts,
-        totalQuantity: accurateStats.totalQuantity,
-        stockValue: `₹${accurateStats.totalStockValue.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`,
-        lowStock: accurateStats.lowStockCount,
-        outOfStock: accurateStats.outOfStockCount,
-        expired: accurateStats.expiredCount,
-        expiring: accurateStats.expiringCount,
-        invalidPricing: accurateStats.invalidPricingCount
-      });
+      console.log('📊 Accurate Inventory Stats:', accurateStats);
 
     } catch (err: any) {
       console.error('Error fetching inventory:', err);
@@ -311,83 +313,29 @@ export default function InventoryManagement() {
     }
   };
 
-  const autoSaveDailyClosing = async () => {
+  // 🔥 Fetch purchase history for a product
+  const fetchPurchaseHistory = async (product: Product) => {
     try {
-      if (!window.inventory) return;
-
-      // Fetch ALL products and calculate accurate stats
-      const allProducts = await window.inventory.getAll();
-      const stats = calculateAccurateStats(allProducts);
-      
-      const today = new Date().toISOString().split('T')[0];
-      const existing = localStorage.getItem('dailyClosings');
-      const closings: DailyClosing[] = existing ? JSON.parse(existing) : [];
-      
-      const todayIndex = closings.findIndex(c => c.date === today);
-      
-      const newClosing: DailyClosing = {
-        date: today,
-        timestamp: Date.now(),
-        totalValue: stats.totalStockValue,
-        totalQuantity: stats.totalQuantity,
-        totalProducts: stats.totalProducts,
-        lowStockCount: stats.lowStockCount,
-        outOfStockCount: stats.outOfStockCount,
-        expiredCount: stats.expiredCount
-      };
-
-      if (todayIndex >= 0) {
-        closings[todayIndex] = newClosing;
-      } else {
-        closings.push(newClosing);
+      if (!window.purchase) {
+        console.warn('Purchase API not available');
+        return;
       }
 
-      // Keep only last 90 days
-      const ninetyDaysAgo = Date.now() - (90 * 24 * 60 * 60 * 1000);
-      const filtered = closings.filter(c => c.timestamp >= ninetyDaysAgo);
-      
-      localStorage.setItem('dailyClosings', JSON.stringify(filtered));
-      setDailyClosings(filtered);
-      
-      console.log('💾 Daily closing saved:', newClosing);
+      const history = await window.purchase.getByProduct(product.itemCode, product.batch || '');
+      setPurchaseHistory(history);
+      setShowPurchaseHistory(true);
+      setSelectedProduct(product);
+
+      console.log('📦 Purchase History for', product.itemName, ':', history);
     } catch (error) {
-      console.error('Error saving daily closing:', error);
+      console.error('Error fetching purchase history:', error);
+      setPurchaseHistory([]);
     }
-  };
-
-  const manualSaveDailyClosing = async () => {
-    await autoSaveDailyClosing();
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 3000);
-  };
-
-  const loadDailyClosings = () => {
-    const existing = localStorage.getItem('dailyClosings');
-    if (existing) {
-      const closings = JSON.parse(existing);
-      setDailyClosings(closings);
-      setFilteredClosings(closings);
-    }
-  };
-
-  const filterClosings = () => {
-    let filtered = [...dailyClosings];
-
-    if (closingDateFrom) {
-      filtered = filtered.filter(c => new Date(c.date) >= new Date(closingDateFrom));
-    }
-    if (closingDateTo) {
-      filtered = filtered.filter(c => new Date(c.date) <= new Date(closingDateTo));
-    }
-
-    filtered.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-    setFilteredClosings(filtered);
   };
 
   const filterProducts = () => {
     let filtered = [...products];
 
-    // Search filter
     if (searchTerm.trim()) {
       const term = searchTerm.toLowerCase();
       filtered = filtered.filter(p =>
@@ -401,17 +349,14 @@ export default function InventoryManagement() {
       );
     }
 
-    // Category filter
     if (filterCategory !== 'all') {
       filtered = filtered.filter(p => p.category === filterCategory);
     }
 
-    // Manufacturer filter
     if (filterManufacturer !== 'all') {
       filtered = filtered.filter(p => p.manufacturer === filterManufacturer);
     }
 
-    // 🔥 Stock status filter using accurate Sets
     if (filterStockStatus !== 'all') {
       if (filterStockStatus === 'low') {
         filtered = filtered.filter(p => lowStockProducts.has(p.id));
@@ -426,7 +371,6 @@ export default function InventoryManagement() {
       }
     }
 
-    // Date range filter
     if (dateFrom) {
       filtered = filtered.filter(p => new Date(p.updatedAt) >= new Date(dateFrom));
     }
@@ -443,8 +387,6 @@ export default function InventoryManagement() {
 
   const totalPages = Math.ceil(filteredProducts.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
-  
-  // 🔥 Show first 10 products in table (paginated)
   const paginatedProducts = filteredProducts.slice(startIndex, startIndex + itemsPerPage);
 
   if (isLoading) {
@@ -487,18 +429,15 @@ export default function InventoryManagement() {
           <p className="text-gray-600 mt-1">SQLite Database • {products.length} total products</p>
         </div>
         <div className="flex space-x-3">
+          {/* 🔥 NEW PURCHASE ENTRY BUTTON */}
           <button
-            onClick={manualSaveDailyClosing}
-            className={`px-6 py-3 rounded-xl font-semibold hover:shadow-xl transition-all flex items-center space-x-2 ${
-              saveSuccess 
-                ? 'bg-gradient-to-r from-green-500 to-green-600 text-white' 
-                : 'bg-gradient-to-r from-blue-500 to-blue-600 text-white'
-            }`}
+            onClick={() => setShowPurchaseInvoice(true)}
+            className="px-6 py-3 bg-gradient-to-r from-indigo-500 to-indigo-600 text-white rounded-xl font-semibold hover:shadow-xl transition-all flex items-center space-x-2"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
-            <span>{saveSuccess ? '✓ Saved!' : 'Save Today\'s Closing'}</span>
+            <span>New Purchase Entry</span>
           </button>
           <button
             onClick={() => setShowStockImport(true)}
@@ -509,7 +448,7 @@ export default function InventoryManagement() {
         </div>
       </div>
 
-      {/* 🔥 Analytics Cards - 100% Accurate from ALL products */}
+      {/* Analytics Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
         <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-4 border-l-4 border-blue-500">
           <p className="text-xs text-blue-700 font-bold mb-1">Total Products</p>
@@ -543,87 +482,6 @@ export default function InventoryManagement() {
           <p className="text-xs text-yellow-700 font-bold mb-1">Price Errors</p>
           <p className="text-2xl font-bold text-yellow-900">{inventoryStats.invalidPricingCount}</p>
         </div>
-      </div>
-
-      {/* Daily Closing Report */}
-      <div className="bg-white rounded-xl shadow-md p-5 border border-gray-200">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-bold text-gray-900">Daily Stock Closing History</h3>
-          <div className="flex space-x-3">
-            <div className="flex items-center space-x-2">
-              <label className="text-sm font-semibold text-gray-700">From:</label>
-              <input
-                type="date"
-                value={closingDateFrom}
-                onChange={(e) => setClosingDateFrom(e.target.value)}
-                className="px-3 py-1.5 border-2 border-gray-300 rounded-lg text-sm"
-              />
-            </div>
-            <div className="flex items-center space-x-2">
-              <label className="text-sm font-semibold text-gray-700">To:</label>
-              <input
-                type="date"
-                value={closingDateTo}
-                onChange={(e) => setClosingDateTo(e.target.value)}
-                className="px-3 py-1.5 border-2 border-gray-300 rounded-lg text-sm"
-              />
-            </div>
-            <button
-              onClick={() => {
-                setClosingDateFrom('');
-                setClosingDateTo('');
-              }}
-              className="px-4 py-1.5 bg-gray-200 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-300"
-            >
-              Clear
-            </button>
-          </div>
-        </div>
-
-        {filteredClosings.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gradient-to-r from-indigo-500 to-indigo-600 text-white">
-                <tr>
-                  <th className="px-4 py-2 text-left font-bold">Date</th>
-                  <th className="px-4 py-2 text-right font-bold">Stock Value (SRate)</th>
-                  <th className="px-4 py-2 text-center font-bold">Products</th>
-                  <th className="px-4 py-2 text-center font-bold">Quantity</th>
-                  <th className="px-4 py-2 text-center font-bold">Low Stock</th>
-                  <th className="px-4 py-2 text-center font-bold">Out of Stock</th>
-                  <th className="px-4 py-2 text-center font-bold">Expired</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200">
-                {filteredClosings.slice(0, 30).map((closing, idx) => (
-                  <tr key={idx} className="hover:bg-indigo-50">
-                    <td className="px-4 py-2 font-bold text-gray-900">
-                      {new Date(closing.date).toLocaleDateString('en-IN', { 
-                        weekday: 'short', 
-                        year: 'numeric', 
-                        month: 'short', 
-                        day: 'numeric' 
-                      })}
-                    </td>
-                    <td className="px-4 py-2 text-right font-bold text-green-700">
-                      ₹{closing.totalValue.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                    </td>
-                    <td className="px-4 py-2 text-center font-semibold text-blue-700">{closing.totalProducts}</td>
-                    <td className="px-4 py-2 text-center font-semibold text-purple-700">{closing.totalQuantity}</td>
-                    <td className="px-4 py-2 text-center font-semibold text-orange-700">{closing.lowStockCount}</td>
-                    <td className="px-4 py-2 text-center font-semibold text-red-700">{closing.outOfStockCount}</td>
-                    <td className="px-4 py-2 text-center font-semibold text-purple-700">{closing.expiredCount || 0}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="text-center py-8 text-gray-500">
-            <p>No daily closings found for the selected date range.</p>
-            <p className="text-sm mt-2">Click "Save Today's Closing" to record current stock value.</p>
-          </div>
-        )}
       </div>
 
       {/* Filters */}
@@ -699,7 +557,8 @@ export default function InventoryManagement() {
         </div>
       </div>
 
-      {/* 🔥 Excel-Style Table - Shows paginated products (10 per page) */}
+      {/* CONTINUE TO PART 2 FOR TABLE AND MODALS... */}
+      {/* 🔥 Excel-Style Inventory Table with Purchase History Button */}
       <div className="bg-white rounded-xl shadow-lg overflow-hidden border border-gray-200">
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
@@ -719,6 +578,7 @@ export default function InventoryManagement() {
                 <th className="px-3 py-3 text-center font-bold uppercase">Expiry</th>
                 <th className="px-3 py-3 text-left font-bold uppercase">Manufacturer</th>
                 <th className="px-3 py-3 text-center font-bold uppercase">Status</th>
+                <th className="px-3 py-3 text-center font-bold uppercase">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
@@ -731,13 +591,12 @@ export default function InventoryManagement() {
                 return (
                   <tr
                     key={product.id}
-                    className={`hover:bg-primary/5 cursor-pointer ${
+                    className={`hover:bg-primary/5 ${
                       isOutOfStock ? 'bg-red-50' : 
                       isLowStock ? 'bg-yellow-50' : 
                       isExpired ? 'bg-purple-50' : 
                       hasInvalidPricing ? 'bg-orange-50' : ''
                     }`}
-                    onClick={() => setSelectedProduct(product)}
                   >
                     <td className="px-3 py-2.5 font-mono font-bold text-gray-900">{product.itemCode}</td>
                     <td className="px-3 py-2.5 font-semibold text-gray-900">{product.itemName}</td>
@@ -771,6 +630,24 @@ export default function InventoryManagement() {
                       {hasInvalidPricing && <span className="px-2 py-1 bg-yellow-500 text-white text-[10px] font-bold rounded-full">ERR</span>}
                       {!isOutOfStock && !isLowStock && !isExpired && !hasInvalidPricing && <span className="px-2 py-1 bg-green-500 text-white text-[10px] font-bold rounded-full">OK</span>}
                     </td>
+                    <td className="px-3 py-2.5 text-center">
+                      <div className="flex space-x-1 justify-center">
+                        <button
+                          onClick={() => setSelectedProduct(product)}
+                          className="px-2 py-1 bg-blue-500 text-white text-[10px] font-bold rounded hover:bg-blue-600"
+                          title="View Details"
+                        >
+                          👁️
+                        </button>
+                        <button
+                          onClick={() => fetchPurchaseHistory(product)}
+                          className="px-2 py-1 bg-indigo-500 text-white text-[10px] font-bold rounded hover:bg-indigo-600"
+                          title="Purchase History"
+                        >
+                          📦
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 );
               })}
@@ -800,8 +677,8 @@ export default function InventoryManagement() {
         </div>
       </div>
 
-      {/* Product Detail Modal */}
-      {selectedProduct && (
+      {/* 🔥 Product Detail Modal */}
+      {selectedProduct && !showPurchaseHistory && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden">
             <div className="bg-gradient-to-r from-primary to-indigo-600 text-white px-6 py-4 flex justify-between items-center">
@@ -872,12 +749,165 @@ export default function InventoryManagement() {
         </div>
       )}
 
-      {/* Stock Import Modal */}
+      {/* 🔥 Purchase History Modal */}
+      // 🔥 FIXED: Replace the Purchase History Modal section in Part 2 with this:
+
+{/* 🔥 Purchase History Modal - FIXED VERSION */}
+{showPurchaseHistory && selectedProduct && (
+  <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div className="bg-white rounded-2xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden">
+      <div className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white px-6 py-4 flex justify-between items-center">
+        <div>
+          <h2 className="text-xl font-bold">📦 Purchase History</h2>
+          <p className="text-sm mt-1">{selectedProduct.itemName} ({selectedProduct.itemCode})</p>
+          {selectedProduct.batch && <p className="text-xs mt-1">Batch: {selectedProduct.batch}</p>}
+        </div>
+        <button onClick={() => { setShowPurchaseHistory(false); setSelectedProduct(null); }} className="p-2 hover:bg-white/10 rounded-lg transition-all">
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      <div className="p-6 overflow-y-auto max-h-[calc(90vh-100px)]">
+        {purchaseHistory.length > 0 ? (
+          <div className="space-y-4">
+            {purchaseHistory.map((invoice, idx) => {
+              // 🔥 FIXED: Find matching items with better logic
+              const matchingItems = invoice.items.filter(item => {
+                const nameMatch = item.productName.toLowerCase().includes(selectedProduct.itemName.toLowerCase()) ||
+                                  selectedProduct.itemName.toLowerCase().includes(item.productName.toLowerCase());
+                const batchMatch = selectedProduct.batch ? 
+                                   item.batch.toLowerCase().includes(selectedProduct.batch.toLowerCase()) : 
+                                   true;
+                return nameMatch || batchMatch;
+              });
+
+              // 🔥 If no matches found, show ALL items in the invoice
+              const itemsToShow = matchingItems.length > 0 ? matchingItems : invoice.items;
+
+              return (
+                <div key={invoice.id} className="border-2 border-indigo-200 rounded-xl p-4 hover:border-indigo-400 transition-all bg-indigo-50/50">
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <h3 className="text-lg font-bold text-indigo-900">Invoice: {invoice.invoiceNo}</h3>
+                      <p className="text-sm text-gray-600 mt-1">Date: {new Date(invoice.header.invoiceDate).toLocaleDateString('en-IN')}</p>
+                      <p className="text-sm text-gray-600">Supplier: <span className="font-bold">{invoice.party.name}</span></p>
+                      {matchingItems.length > 0 && matchingItems.length !== invoice.items.length && (
+                        <p className="text-xs text-blue-600 mt-1">✓ Found {matchingItems.length} matching item(s) in this invoice</p>
+                      )}
+                      {matchingItems.length === 0 && (
+                        <p className="text-xs text-orange-600 mt-1">ℹ️ Showing all items (no exact match found)</p>
+                      )}
+                    </div>
+                    <div className="text-right">
+                      <p className="text-2xl font-bold text-green-700">₹{invoice.totals.total.toFixed(2)}</p>
+                      <p className="text-xs text-gray-600">Total Amount</p>
+                    </div>
+                  </div>
+                  
+                  <div className="bg-white rounded-lg p-3 border border-gray-200">
+                    <h4 className="text-xs font-bold text-gray-700 mb-2">
+                      Items Purchased: ({itemsToShow.length} of {invoice.items.length} items)
+                    </h4>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-100">
+                          <tr>
+                            <th className="px-2 py-1 text-left font-bold">#</th>
+                            <th className="px-2 py-1 text-left font-bold">Product</th>
+                            <th className="px-2 py-1 text-center font-bold">Batch</th>
+                            <th className="px-2 py-1 text-center font-bold">Expiry</th>
+                            <th className="px-2 py-1 text-center font-bold">Qty</th>
+                            <th className="px-2 py-1 text-center font-bold">Free</th>
+                            <th className="px-2 py-1 text-right font-bold">Rate</th>
+                            <th className="px-2 py-1 text-right font-bold">MRP</th>
+                            <th className="px-2 py-1 text-center font-bold">Dis%</th>
+                            <th className="px-2 py-1 text-right font-bold">Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-200">
+                          {itemsToShow.map((item, itemIdx) => {
+                            // 🔥 Highlight matching rows
+                            const isMatch = item.productName.toLowerCase().includes(selectedProduct.itemName.toLowerCase()) ||
+                                          selectedProduct.itemName.toLowerCase().includes(item.productName.toLowerCase()) ||
+                                          (selectedProduct.batch && item.batch.toLowerCase().includes(selectedProduct.batch.toLowerCase()));
+                            
+                            return (
+                              <tr key={itemIdx} className={isMatch ? 'bg-yellow-50 hover:bg-yellow-100' : 'hover:bg-blue-50'}>
+                                <td className="px-2 py-1.5 text-center font-bold text-gray-700">{item.slNo}</td>
+                                <td className="px-2 py-1.5 font-semibold">
+                                  {item.productName}
+                                  {isMatch && <span className="ml-2 px-1.5 py-0.5 bg-green-500 text-white text-[9px] rounded-full">MATCH</span>}
+                                </td>
+                                <td className="px-2 py-1.5 text-center font-mono">{item.batch}</td>
+                                <td className="px-2 py-1.5 text-center text-purple-700">{item.exp}</td>
+                                <td className="px-2 py-1.5 text-center font-bold text-blue-700">{item.qty}</td>
+                                <td className="px-2 py-1.5 text-center text-orange-700">{item.free}</td>
+                                <td className="px-2 py-1.5 text-right font-semibold">₹{item.rate.toFixed(2)}</td>
+                                <td className="px-2 py-1.5 text-right">₹{item.mrp.toFixed(2)}</td>
+                                <td className="px-2 py-1.5 text-center">{item.dis}%</td>
+                                <td className="px-2 py-1.5 text-right font-bold text-green-700">₹{item.value.toFixed(2)}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-3 mt-3">
+                    <div className="bg-blue-50 rounded-lg p-2">
+                      <p className="text-[10px] text-blue-700 font-bold">Total Qty</p>
+                      <p className="text-lg font-bold text-blue-900">{invoice.totals.totalQty}</p>
+                    </div>
+                    <div className="bg-purple-50 rounded-lg p-2">
+                      <p className="text-[10px] text-purple-700 font-bold">Total Free</p>
+                      <p className="text-lg font-bold text-purple-900">{invoice.totals.totalFree}</p>
+                    </div>
+                    <div className="bg-green-50 rounded-lg p-2">
+                      <p className="text-[10px] text-green-700 font-bold">Total GST</p>
+                      <p className="text-lg font-bold text-green-900">₹{invoice.totals.totalGST.toFixed(2)}</p>
+                    </div>
+                    <div className="bg-indigo-50 rounded-lg p-2">
+                      <p className="text-[10px] text-indigo-700 font-bold">Grand Total</p>
+                      <p className="text-lg font-bold text-indigo-900">₹{invoice.totals.total.toFixed(2)}</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="text-center py-12">
+            <svg className="w-20 h-20 text-gray-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+            </svg>
+            <p className="text-lg font-semibold text-gray-700">No Purchase History Found</p>
+            <p className="text-sm text-gray-500 mt-2">This product has not been purchased yet or Purchase DB is empty.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  </div>
+)}
+
+
+      {/* 🔥 Stock Import Modal */}
       {showStockImport && (
         <StockImport 
           onClose={() => { 
             setShowStockImport(false); 
             fetchData(); 
+          }} 
+        />
+      )}
+
+      {/* 🔥 Purchase Invoice Modal (New Purchase Entry) */}
+      {showPurchaseInvoice && (
+        <PurchaseInvoice 
+          onClose={() => { 
+            setShowPurchaseInvoice(false); 
+            fetchData(); // Reload inventory after purchase entry
           }} 
         />
       )}

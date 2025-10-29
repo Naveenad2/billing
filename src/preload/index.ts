@@ -1,73 +1,63 @@
 // src/preload/index.ts
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron'
 
-// Expose inventory API to renderer process
+// Expose inventory API
 contextBridge.exposeInMainWorld('inventory', {
-  // Get all products
   getAll: () => ipcRenderer.invoke('inventory:getAll'),
-  
-  // Get inventory stats
   stats: () => ipcRenderer.invoke('inventory:stats'),
-  
-  // Get low stock products
   getLowStock: () => ipcRenderer.invoke('inventory:getLowStock'),
-  
-  // Get out of stock products
   getOutOfStock: () => ipcRenderer.invoke('inventory:getOutOfStock'),
-  
-  // Get expiring products
   getExpiring: (days: number) => ipcRenderer.invoke('inventory:getExpiring', days),
-  
-  // Get expired products
   getExpired: () => ipcRenderer.invoke('inventory:getExpired'),
-  
-  // Decrement stock by code and batch
-  decrementStockByCodeBatch: (code: string, batch: string, qty: number) => 
+  decrementStock: (code: string, batch: string, qty: number) => 
     ipcRenderer.invoke('inventory:decrementStock', code, batch, qty),
-  
-  // 🔥 NEW: Increment stock by code and batch (for returns)
-  incrementStockByCodeBatch: (code: string, batch: string, qty: number) => 
+  incrementStock: (code: string, batch: string, qty: number) => 
     ipcRenderer.invoke('inventory:incrementStock', code, batch, qty),
-  
-  // Search products
   search: (query: string) => ipcRenderer.invoke('inventory:search', query),
-  
-  // Get categories
   getCategories: () => ipcRenderer.invoke('inventory:getCategories'),
-  
-  // Bulk add for Excel import
   bulkAdd: (products: any[]) => ipcRenderer.invoke('inventory:bulkAdd', products),
-  
-  // Get by item code (for duplicate check)
-  getByItemCode: (code: string) => ipcRenderer.invoke('inventory:getByCode', code),
-});
+  add: (product: any) => ipcRenderer.invoke('inventory:add', product),
+  update: (id: string, updates: any) => ipcRenderer.invoke('inventory:update', id, updates),
+  delete: (id: string) => ipcRenderer.invoke('inventory:delete', id),
+  getByCode: (code: string) => ipcRenderer.invoke('inventory:getByCode', code),
+  getById: (id: string) => ipcRenderer.invoke('inventory:getById', id),
+  updateStock: (id: string, qty: number, type: 'add' | 'subtract') => 
+    ipcRenderer.invoke('inventory:updateStock', id, qty, type),
+  getByCodeBatch: (code: string, batch: string) => 
+    ipcRenderer.invoke('inventory:getByCodeBatch', code, batch),
+  decrementByCodeBatch: (code: string, batch: string, qty: number) => 
+    ipcRenderer.invoke('inventory:decrementByCodeBatch', code, batch, qty),
+  getByCategory: (category: string) => ipcRenderer.invoke('inventory:getByCategory', category),
+  getByManufacturer: (manufacturer: string) => 
+    ipcRenderer.invoke('inventory:getByManufacturer', manufacturer),
+  getByBatch: (batch: string) => ipcRenderer.invoke('inventory:getByBatch', batch),
+  calculateValue: () => ipcRenderer.invoke('inventory:calculateValue'),
+  export: () => ipcRenderer.invoke('inventory:export'),
+  import: (jsonData: string) => ipcRenderer.invoke('inventory:import', jsonData),
+  clear: () => ipcRenderer.invoke('inventory:clear'),
+  addProduct: (product: any) => ipcRenderer.invoke('inventory:addProduct', product),
+  updateProduct: (id: string, updates: any) => 
+    ipcRenderer.invoke('inventory:updateProduct', id, updates),
+  incrementStockByCodeBatch: (code: string, batch: string, qty: number) => 
+    ipcRenderer.invoke('inventory:incrementStockByCodeBatch', code, batch, qty),
+})
 
-// Type definitions for TypeScript
-export interface InventoryAPI {
-  getAll: () => Promise<any[]>;
-  stats: () => Promise<any>;
-  getLowStock: () => Promise<any[]>;
-  getOutOfStock: () => Promise<any[]>;
-  getExpiring: (days: number) => Promise<any[]>;
-  getExpired: () => Promise<any[]>;
-  decrementStockByCodeBatch: (code: string, batch: string, qty: number) => Promise<{
-    success: boolean;
-    newStock: number;
-    itemName: string;
-  }>;
-  incrementStockByCodeBatch: (code: string, batch: string, qty: number) => Promise<{
-    success: boolean;
-    newStock: number;
-    itemName: string;
-  }>; // 🔥 NEW
-  search: (query: string) => Promise<any[]>;
-  getCategories: () => Promise<string[]>;
-  bulkAdd: (products: any[]) => Promise<any[]>;
-  getByItemCode: (code: string) => Promise<any | undefined>;
-}
+// Expose purchase API
+contextBridge.exposeInMainWorld('purchase', {
+  getAll: () => ipcRenderer.invoke('purchase:getAll'),
+  getById: (id: string) => ipcRenderer.invoke('purchase:getById', id),
+  getByProduct: (itemCode: string, batch: string) => 
+    ipcRenderer.invoke('purchase:getByProduct', itemCode, batch),
+  search: (query: string) => ipcRenderer.invoke('purchase:search', query),
+  delete: (id: string) => ipcRenderer.invoke('purchase:delete', id),
+  create: (record: any) => ipcRenderer.invoke('purchase:create', record),
+})
 
-declare global {
-  interface Window {
-    inventory: InventoryAPI;
-  }
-}
+// Expose returns API
+contextBridge.exposeInMainWorld('returns', {
+  getAll: () => ipcRenderer.invoke('returns:getAll'),
+  create: (record: any) => ipcRenderer.invoke('returns:create', record),
+  getByInvoice: (invoiceNo: string) => ipcRenderer.invoke('returns:getByInvoice', invoiceNo),
+})
+
+console.log('✅ Preload script loaded successfully')

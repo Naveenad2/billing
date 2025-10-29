@@ -1,216 +1,209 @@
-  // src/components/PurchaseInvoice.tsx
-// ULTIMATE WIDESCREEN PURCHASE INVOICE - PLAIN ADVANCED BILL WITH PROFIT
-// COMPLETE INVENTORY MAPPING - PRINT & PDF SAVE - NO LAZY CODE
+// src/components/PurchaseInvoice.tsx - PART 1 (COMPLETE - ALL FIELDS EDITABLE)
+// 🔥 PROFESSIONAL PURCHASE INVOICE WITH MANUAL ENTRY + SEARCH
 
-import { useState, useEffect } from 'react';
-import {
-  savePurchaseInvoice,
-  type PurchaseInvoiceRecord,
-} from '../services/purchaseDB';
+import { useState, useEffect, useRef } from 'react';
+import { savePurchaseInvoice, type PurchaseInvoiceRecord } from '../services/purchaseDB';
 
-// Inventory API
+/********************** TYPES **********************/
 declare global {
   interface Window {
     inventory?: {
-      getAll: () => Promise<any[]>;
-      addOrUpdate: (product: any) => Promise<{ success: boolean }>;
-      incrementStockByCodeBatch: (code: string, batch: string, qty: number) => Promise<any>;
-      getByCodeAndBatch: (code: string, batch: string) => Promise<any>;
+      getAll: () => Promise<Product[]>;
+      search: (term: string) => Promise<Product[]>;
+      addProduct: (product: Partial<Product>) => Promise<{ success: boolean; product: Product }>;
+      updateProduct: (id: string, updates: Partial<Product>) => Promise<{ success: boolean; product: Product }>;
+      incrementStockByCodeBatch: (code: string, batch: string, qty: number) => Promise<{ success: boolean; newStock: number }>;
     };
   }
 }
 
-// Types
-type PurchaseItem = {
+interface Product {
   id: string;
-  slNo: number;
-  qty: number;
-  free: number;
-  mfr: string;
-  pack: number;
-  productName: string;
-  batch: string;
-  exp: string;
-  hsn: string;
-  mrp: number;
-  rate: number;
-  dis: number;
-  sgst: number;
-  sgstValue: number;
-  cgst: number;
-  cgstValue: number;
-  value: number;
-};
-
-type ProductBatch = {
   itemCode: string;
   itemName: string;
-  batch: string;
-  expiryDate: string;
+  batch?: string;
+  expiryDate?: string;
+  hsnCode: string;
+  manufacturer?: string;
+  packSize?: number;
   mrp: number;
+  purchasePrice: number;
+  sellingPriceTab: number;
   stockQuantity: number;
   cgstRate: number;
   sgstRate: number;
-  hsnCode: string;
-  manufacturer: string;
-  packSize: number;
-  purchasePrice: number;
+  category: string;
+  rol: number;
+  minStockLevel: number;
+  maxStockLevel: number;
+}
+
+interface PurchaseItem {
+  id: string;
+  slNo: number;
+  itemCode: string;
+  itemName: string;
+  batch: string;
+  expiry: string;
+  hsn: string;
+  mfr: string;
+  pack: number;
+  qty: number;
+  free: number;
+  rate: number;
+  mrp: number;
+  dis: number;
+  cgst: number;
+  sgst: number;
+  cgstAmt: number;
+  sgstAmt: number;
+  amount: number;
+}
+
+/********************** UTILITIES **********************/
+const generateId = () => Math.random().toString(36).substr(2, 9);
+
+// Auto-format expiry date with "/" (MM/YY)
+const formatExpiry = (value: string): string => {
+  const cleaned = value.replace(/\D/g, '');
+  if (cleaned.length >= 2) {
+    return cleaned.slice(0, 2) + '/' + cleaned.slice(2, 4);
+  }
+  return cleaned;
 };
 
-// Utilities
-function fmtINR(n: number) {
-  return `₹${(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function toDisplayDate(iso: string) {
-  if (!iso) return '';
-  try {
-    return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-  } catch {
-    return iso;
-  }
-}
-
-function generateId() {
-  return Math.random().toString(36).substr(2, 9);
-}
-
-export default function PurchaseInvoice() {
-  // Header Info
+/********************** MAIN COMPONENT **********************/
+export default function PurchaseInvoice({ onClose }: { onClose: () => void }) {
+  // ========== INVOICE HEADER ==========
   const [invoiceNo, setInvoiceNo] = useState('');
   const [invoiceDate, setInvoiceDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
-  const [dueDate, setDueDate] = useState<string>('');
-  const [orderDate, setOrderDate] = useState<string>('');
+  const [dueDate, setDueDate] = useState('');
+  const [orderDate, setOrderDate] = useState('');
   const [lrNo, setLrNo] = useState('');
-  const [lrDate, setLrDate] = useState<string>('');
-  const [cases, setCases] = useState<number | ''>('');
+  const [lrDate, setLrDate] = useState('');
   const [transport, setTransport] = useState('');
+  const [cases, setCases] = useState<number | ''>('');
 
-  // Party Info
-  const [partyName, setPartyName] = useState('');
-  const [partyAddress, setPartyAddress] = useState('');
-  const [partyPhone, setPartyPhone] = useState('');
-  const [partyGSTIN, setPartyGSTIN] = useState('');
-  const [partyState, setPartyState] = useState('Kerala');
-  const [partyStateCode, setPartyStateCode] = useState('32');
+  // ========== SUPPLIER DETAILS ==========
+  const [supplierName, setSupplierName] = useState('');
+  const [supplierAddress, setSupplierAddress] = useState('');
+  const [supplierPhone, setSupplierPhone] = useState('');
+  const [supplierEmail, setSupplierEmail] = useState('');
+  const [supplierGSTIN, setSupplierGSTIN] = useState('');
+  const [supplierDLNo, setSupplierDLNo] = useState('');
+  const [supplierState, setSupplierState] = useState('Kerala');
+  const [supplierStateCode, setSupplierStateCode] = useState('32');
+  const [paymentType, setPaymentType] = useState('Cash');
 
-  // Items
+  // ========== ITEMS ==========
   const [items, setItems] = useState<PurchaseItem[]>([
     {
       id: generateId(),
       slNo: 1,
-      qty: 0,
-      free: 0,
+      itemCode: '',
+      itemName: '',
+      batch: '',
+      expiry: '',
+      hsn: '',
       mfr: '',
       pack: 1,
-      productName: '',
-      batch: '',
-      exp: '',
-      hsn: '',
-      mrp: 0,
+      qty: 0,
+      free: 0,
       rate: 0,
+      mrp: 0,
       dis: 0,
-      sgst: 0,
-      sgstValue: 0,
-      cgst: 0,
-      cgstValue: 0,
-      value: 0,
+      cgst: 2.5,
+      sgst: 2.5,
+      cgstAmt: 0,
+      sgstAmt: 0,
+      amount: 0,
     },
   ]);
 
-  // Product Search
+  // ========== INVENTORY DATA ==========
+  const [allProducts, setAllProducts] = useState<Product[]>([]);
+  const [suppliers, setSuppliers] = useState<string[]>(['Supplier A', 'Supplier B', 'Supplier C']);
+
+  // ========== MODALS ==========
   const [showProductSearch, setShowProductSearch] = useState(false);
-  const [productQuery, setProductQuery] = useState('');
-  const [allProducts, setAllProducts] = useState<ProductBatch[]>([]);
-  const [filteredProducts, setFilteredProducts] = useState<ProductBatch[]>([]);
-  const [currentEditingRow, setCurrentEditingRow] = useState<string | null>(null);
+  const [currentEditingRow, setCurrentEditingRow] = useState<number | null>(null);
+  const [productSearchQuery, setProductSearchQuery] = useState('');
+  const [filteredProducts, setFilteredProducts] = useState<Product[]>([]);
 
-  // Bill Preview
-  const [showBillPreview, setShowBillPreview] = useState(false);
-  const [billPreviewHTML, setBillPreviewHTML] = useState('');
-
-  // Toast
-  const [toast, setToast] = useState<{ show: boolean; message: string; type: 'success' | 'error' }>({
+  // ========== TOAST & PREVIEW ==========
+  const [toast, setToast] = useState<{ show: boolean; messages: string[]; type: 'success' | 'error' }>({
     show: false,
-    message: '',
+    messages: [],
     type: 'success',
   });
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewHTML, setPreviewHTML] = useState('');
 
-  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
-    setToast({ show: true, message, type });
-    setTimeout(() => setToast({ show: false, message: '', type: 'success' }), 3500);
+  // ========== REFS FOR NAVIGATION ==========
+  const inputRefs = useRef<{ [k: string]: HTMLInputElement | null }>({});
+
+  const showToast = (messages: string[], type: 'success' | 'error' = 'success') => {
+    setToast({ show: true, messages, type });
+    setTimeout(() => setToast({ show: false, messages: [], type: 'success' }), 5000);
   };
 
-  // Load products
+  /********************** LOAD INVENTORY **********************/
   useEffect(() => {
-    const loadProducts = async () => {
-      if (!window.inventory?.getAll) return;
-      try {
-        const products = await window.inventory.getAll();
-        const formatted = products.map((p: any) => ({
-          itemCode: p.itemCode || '',
-          itemName: p.itemName || '',
-          batch: p.batch || '',
-          expiryDate: p.expiryDate || '',
-          mrp: Number(p.mrp || 0),
-          stockQuantity: Number(p.stockQuantity || 0),
-          cgstRate: Number(p.cgstRate || 0),
-          sgstRate: Number(p.sgstRate || 0),
-          hsnCode: p.hsnCode || '',
-          manufacturer: p.manufacturer || '',
-          packSize: Number(p.packSize || 1),
-          purchasePrice: Number(p.purchasePrice || 0),
-        }));
-        setAllProducts(formatted);
-      } catch (error) {
-        console.error('Failed to load products:', error);
-      }
-    };
-    loadProducts();
+    loadInventoryData();
   }, []);
 
-  // Filter products
+  const loadInventoryData = async () => {
+    if (!window.inventory?.getAll) return;
+    try {
+      const products = await window.inventory.getAll();
+      setAllProducts(products);
+    } catch (error) {
+      console.error('Failed to load inventory:', error);
+    }
+  };
+
+  /********************** PRODUCT SEARCH **********************/
   useEffect(() => {
-    if (!productQuery.trim()) {
+    if (!productSearchQuery.trim()) {
       setFilteredProducts([]);
       return;
     }
-    const q = productQuery.toLowerCase();
+    const q = productSearchQuery.toLowerCase();
     const filtered = allProducts.filter(
       p =>
-        p.itemCode.toLowerCase().includes(q) ||
         p.itemName.toLowerCase().includes(q) ||
-        p.batch.toLowerCase().includes(q)
+        p.itemCode.toLowerCase().includes(q) ||
+        p.batch?.toLowerCase().includes(q) ||
+        p.hsnCode.toLowerCase().includes(q)
     );
     setFilteredProducts(filtered.slice(0, 50));
-  }, [productQuery, allProducts]);
+  }, [productSearchQuery, allProducts]);
 
-  // Open product search
-  const openProductSearch = (rowId: string) => {
-    setCurrentEditingRow(rowId);
-    setProductQuery('');
+  const openProductSearch = (idx: number) => {
+    setCurrentEditingRow(idx);
+    setProductSearchQuery('');
     setShowProductSearch(true);
   };
 
-  // Select product
-  const selectProduct = (product: ProductBatch) => {
-    if (!currentEditingRow) return;
+  const selectProduct = (product: Product) => {
+    if (currentEditingRow === null) return;
 
-    const updatedItems = items.map(item => {
-      if (item.id === currentEditingRow) {
-        return {
+    const updatedItems = items.map((item, idx) => {
+      if (idx === currentEditingRow) {
+        return calculateRow({
           ...item,
-          productName: product.itemName,
-          batch: product.batch,
-          exp: product.expiryDate,
+          itemCode: product.itemCode,
+          itemName: product.itemName,
+          batch: product.batch || '',
+          expiry: formatExpiry(product.expiryDate || ''),
           hsn: product.hsnCode,
+          mfr: product.manufacturer || '',
+          pack: product.packSize || 1,
           mrp: product.mrp,
-          rate: product.purchasePrice || product.mrp * 0.8,
-          mfr: product.manufacturer,
-          pack: product.packSize,
+          rate: product.purchasePrice,
           cgst: product.cgstRate,
           sgst: product.sgstRate,
-        };
+        });
       }
       return item;
     });
@@ -218,31 +211,33 @@ export default function PurchaseInvoice() {
     setItems(updatedItems);
     setShowProductSearch(false);
     setCurrentEditingRow(null);
-    showToast('Product added to invoice');
+    setTimeout(() => inputRefs.current[`${currentEditingRow}-qty`]?.focus(), 50);
   };
 
-  // Calculate row
+  /********************** ROW CALCULATIONS **********************/
   const calculateRow = (item: PurchaseItem): PurchaseItem => {
     const grossAmount = item.qty * item.rate;
     const discountAmount = (grossAmount * item.dis) / 100;
     const taxableAmount = grossAmount - discountAmount;
-    const cgstValue = (taxableAmount * item.cgst) / 100;
-    const sgstValue = (taxableAmount * item.sgst) / 100;
-    const value = taxableAmount + cgstValue + sgstValue;
+    const cgstAmt = (taxableAmount * item.cgst) / 100;
+    const sgstAmt = (taxableAmount * item.sgst) / 100;
+    const amount = taxableAmount + cgstAmt + sgstAmt;
 
     return {
       ...item,
-      cgstValue: Number(cgstValue.toFixed(2)),
-      sgstValue: Number(sgstValue.toFixed(2)),
-      value: Number(value.toFixed(2)),
+      cgstAmt: Number(cgstAmt.toFixed(2)),
+      sgstAmt: Number(sgstAmt.toFixed(2)),
+      amount: Number(amount.toFixed(2)),
     };
   };
 
-  // Update item
-  const updateItem = (id: string, field: keyof PurchaseItem, value: any) => {
-    const updated = items.map(item => {
-      if (item.id === id) {
-        const newItem = { ...item, [field]: value };
+  const updateItem = (idx: number, field: keyof PurchaseItem, value: any) => {
+    const updated = items.map((item, i) => {
+      if (i === idx) {
+        let newItem = { ...item, [field]: value };
+        if (field === 'expiry' && typeof value === 'string') {
+          newItem.expiry = formatExpiry(value);
+        }
         return calculateRow(newItem);
       }
       return item;
@@ -250,642 +245,162 @@ export default function PurchaseInvoice() {
     setItems(updated);
   };
 
-  // Add row
   const addRow = () => {
     const newRow: PurchaseItem = {
       id: generateId(),
       slNo: items.length + 1,
-      qty: 0,
-      free: 0,
+      itemCode: '',
+      itemName: '',
+      batch: '',
+      expiry: '',
+      hsn: '',
       mfr: '',
       pack: 1,
-      productName: '',
-      batch: '',
-      exp: '',
-      hsn: '',
-      mrp: 0,
+      qty: 0,
+      free: 0,
       rate: 0,
+      mrp: 0,
       dis: 0,
-      sgst: 0,
-      sgstValue: 0,
-      cgst: 0,
-      cgstValue: 0,
-      value: 0,
+      cgst: 2.5,
+      sgst: 2.5,
+      cgstAmt: 0,
+      sgstAmt: 0,
+      amount: 0,
     };
     setItems([...items, newRow]);
   };
 
-  // Delete row
-  const deleteRow = (id: string) => {
-    if (items.length === 1) {
-      showToast('Cannot delete the last row', 'error');
-      return;
-    }
-    const filtered = items.filter(item => item.id !== id);
-    const renumbered = filtered.map((item, idx) => ({ ...item, slNo: idx + 1 }));
+  const deleteRow = (idx: number) => {
+    if (items.length === 1) return;
+    const filtered = items.filter((_, i) => i !== idx);
+    const renumbered = filtered.map((item, i) => ({ ...item, slNo: i + 1 }));
     setItems(renumbered);
   };
 
-  // Calculate totals
+  const clearAll = () => {
+    if (!confirm('Clear all fields? This will reset the entire form.')) return;
+    setInvoiceNo('');
+    setDueDate('');
+    setOrderDate('');
+    setLrNo('');
+    setLrDate('');
+    setTransport('');
+    setCases('');
+    setSupplierName('');
+    setSupplierAddress('');
+    setSupplierPhone('');
+    setSupplierEmail('');
+    setSupplierGSTIN('');
+    setSupplierDLNo('');
+    setSupplierState('Kerala');
+    setSupplierStateCode('32');
+    setPaymentType('Cash');
+    setItems([{
+      id: generateId(),
+      slNo: 1,
+      itemCode: '',
+      itemName: '',
+      batch: '',
+      expiry: '',
+      hsn: '',
+      mfr: '',
+      pack: 1,
+      qty: 0,
+      free: 0,
+      rate: 0,
+      mrp: 0,
+      dis: 0,
+      cgst: 2.5,
+      sgst: 2.5,
+      cgstAmt: 0,
+      sgstAmt: 0,
+      amount: 0,
+    }]);
+  };
+
+  /********************** KEYBOARD NAVIGATION **********************/
+  const columns = ['itemCode', 'itemName', 'batch', 'expiry', 'hsn', 'mfr', 'pack', 'qty', 'free', 'rate', 'mrp', 'dis', 'cgst', 'sgst'] as const;
+
+  const handleKeyDown = (e: React.KeyboardEvent, rowIdx: number, colIdx: number) => {
+    if (e.key === 'F3') {
+      e.preventDefault();
+      openProductSearch(rowIdx);
+      return;
+    }
+
+    if (e.key === 'Tab' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const nextCol = Math.min(colIdx + 1, columns.length - 1);
+      inputRefs.current[`${rowIdx}-${columns[nextCol]}`]?.focus();
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const prevCol = Math.max(colIdx - 1, 0);
+      inputRefs.current[`${rowIdx}-${columns[prevCol]}`]?.focus();
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (rowIdx < items.length - 1) {
+        inputRefs.current[`${rowIdx + 1}-${columns[colIdx]}`]?.focus();
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (rowIdx > 0) {
+        inputRefs.current[`${rowIdx - 1}-${columns[colIdx]}`]?.focus();
+      }
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (rowIdx === items.length - 1) {
+        addRow();
+        setTimeout(() => inputRefs.current[`${items.length}-${columns[0]}`]?.focus(), 50);
+      } else {
+        inputRefs.current[`${rowIdx + 1}-${columns[colIdx]}`]?.focus();
+      }
+    }
+  };
+
+  /********************** TOTALS **********************/
   const totals = items.reduce(
     (acc, item) => {
       const grossAmount = item.qty * item.rate;
       const discountAmount = (grossAmount * item.dis) / 100;
       const taxableAmount = grossAmount - discountAmount;
-      
-      // Calculate potential profit (MRP - Purchase Rate)
-      const potentialProfitPerUnit = item.mrp - item.rate;
-      const totalPotentialProfit = potentialProfitPerUnit * item.qty;
 
       return {
         totalQty: acc.totalQty + item.qty,
         totalFree: acc.totalFree + item.free,
-        scheme: acc.scheme + discountAmount,
-        discount: acc.discount,
-        sgst: acc.sgst + item.sgstValue,
-        cgst: acc.cgst + item.cgstValue,
-        totalGST: acc.totalGST + item.cgstValue + item.sgstValue,
-        total: acc.total + item.value,
-        potentialProfit: acc.potentialProfit + totalPotentialProfit,
-        totalMRPValue: acc.totalMRPValue + (item.mrp * item.qty),
+        taxable: acc.taxable + taxableAmount,
+        cgst: acc.cgst + item.cgstAmt,
+        sgst: acc.sgst + item.sgstAmt,
+        totalGST: acc.totalGST + item.cgstAmt + item.sgstAmt,
+        grandTotal: acc.grandTotal + item.amount,
       };
     },
-    { 
-      totalQty: 0, 
-      totalFree: 0, 
-      scheme: 0, 
-      discount: 0, 
-      sgst: 0, 
-      cgst: 0, 
-      totalGST: 0, 
-      total: 0,
-      potentialProfit: 0,
-      totalMRPValue: 0,
-    }
+    { totalQty: 0, totalFree: 0, taxable: 0, cgst: 0, sgst: 0, totalGST: 0, grandTotal: 0 }
   );
 
-  // GST breakdown
-  const gstBreakdown = items.reduce((acc, item) => {
-    const grossAmount = item.qty * item.rate;
-    const discountAmount = (grossAmount * item.dis) / 100;
-    const taxableAmount = grossAmount - discountAmount;
-    const gstRate = item.cgst + item.sgst;
-
-    if (gstRate > 0 && item.qty > 0) {
-      if (!acc[gstRate]) {
-        acc[gstRate] = { taxable: 0, cgst: 0, sgst: 0 };
-      }
-      acc[gstRate].taxable += taxableAmount;
-      acc[gstRate].cgst += item.cgstValue;
-      acc[gstRate].sgst += item.sgstValue;
-    }
-
-    return acc;
-  }, {} as Record<number, { taxable: number; cgst: number; sgst: number }>);
-
-  // Generate PLAIN WHITE ADVANCED BILL with PROFIT
-  const generateBillPreviewHTML = () => {
-    const validItems = items.filter(i => i.productName && i.qty > 0);
-    
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <title>Purchase Invoice - ${invoiceNo}</title>
-        <style>
-          @page { size: A4 landscape; margin: 20mm; }
-          @media print { 
-            body { margin: 0; padding: 0; }
-            .no-print { display: none; }
-          }
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { 
-            font-family: 'Arial', sans-serif; 
-            font-size: 10px;
-            color: #000;
-            background: #fff;
-            line-height: 1.4;
-          }
-          .container { 
-            width: 100%; 
-            max-width: 297mm;
-            margin: 0 auto;
-            padding: 20px;
-            background: #fff;
-          }
-          .header {
-            text-align: center;
-            border: 2px solid #000;
-            padding: 20px;
-            margin-bottom: 15px;
-          }
-          .header h1 {
-            font-size: 24px;
-            font-weight: bold;
-            margin-bottom: 8px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-          }
-          .header h2 {
-            font-size: 18px;
-            font-weight: bold;
-            margin-bottom: 10px;
-          }
-          .header p {
-            font-size: 10px;
-            line-height: 1.6;
-            margin: 3px 0;
-          }
-          .info-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-bottom: 15px;
-          }
-          .info-box {
-            border: 2px solid #000;
-            padding: 15px;
-          }
-          .info-box-title {
-            font-weight: bold;
-            font-size: 11px;
-            margin-bottom: 10px;
-            padding-bottom: 8px;
-            border-bottom: 1px solid #000;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-          }
-          .info-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 5px 0;
-            font-size: 10px;
-          }
-          .info-label {
-            font-weight: bold;
-            min-width: 120px;
-          }
-          .info-value {
-            flex: 1;
-            text-align: right;
-          }
-          table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 15px;
-            border: 2px solid #000;
-          }
-          th {
-            background: #fff;
-            color: #000;
-            font-weight: bold;
-            padding: 10px 8px;
-            text-align: center;
-            font-size: 9px;
-            border: 1px solid #000;
-            text-transform: uppercase;
-            letter-spacing: 0.3px;
-          }
-          td {
-            padding: 8px 6px;
-            border: 1px solid #000;
-            font-size: 9px;
-            text-align: center;
-          }
-          td.left { text-align: left; }
-          td.right { text-align: right; }
-          .totals-grid {
-            display: grid;
-            grid-template-columns: 1.5fr 1fr;
-            gap: 15px;
-            margin-top: 15px;
-          }
-          .gst-breakdown {
-            border: 2px solid #000;
-            padding: 15px;
-          }
-          .gst-breakdown-title {
-            font-weight: bold;
-            font-size: 12px;
-            margin-bottom: 10px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-          }
-          .gst-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 10px;
-          }
-          .gst-table th {
-            background: #fff;
-            font-size: 9px;
-            padding: 8px 6px;
-            border: 1px solid #000;
-          }
-          .gst-table td {
-            font-size: 9px;
-            padding: 6px;
-            border: 1px solid #000;
-          }
-          .summary-box {
-            border: 2px solid #000;
-            padding: 15px;
-          }
-          .summary-title {
-            font-weight: bold;
-            font-size: 12px;
-            margin-bottom: 10px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-          }
-          .summary-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            font-size: 11px;
-            border-bottom: 1px solid #ddd;
-          }
-          .summary-row:last-child {
-            border-bottom: none;
-          }
-          .summary-row.grand {
-            font-size: 16px;
-            font-weight: bold;
-            padding-top: 12px;
-            margin-top: 10px;
-            border-top: 2px solid #000;
-          }
-          .profit-section {
-            background: #fff;
-            border: 2px solid #000;
-            padding: 15px;
-            margin-top: 15px;
-          }
-          .profit-title {
-            font-weight: bold;
-            font-size: 12px;
-            margin-bottom: 10px;
-            text-transform: uppercase;
-          }
-          .profit-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            font-size: 11px;
-            border-bottom: 1px solid #ddd;
-          }
-          .footer {
-            margin-top: 20px;
-            padding-top: 15px;
-            border-top: 2px solid #000;
-            text-align: center;
-            font-size: 9px;
-          }
-          .footer p {
-            margin: 4px 0;
-          }
-          .signature-section {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-top: 30px;
-            padding-top: 20px;
-            border-top: 1px solid #000;
-          }
-          .signature-box {
-            text-align: center;
-            padding-top: 40px;
-            border-top: 1px solid #000;
-            font-size: 10px;
-            font-weight: bold;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <!-- Header -->
-          <div class="header">
-            <h1>PENCOS MEDICALS</h1>
-            <h2>PURCHASE INVOICE / GST CREDIT NOTE</h2>
-            <p>MELEPANDIYIL BUILDING, CHENGANNUR, KERALA-690514</p>
-            <p>Phone: 9497370571, 9447207537</p>
-            <p>GSTIN: 32AAXFM5083E1Z1 | State: Kerala (Code: 32)</p>
-          </div>
-
-          <!-- Info Grid -->
-          <div class="info-grid">
-            <div class="info-box">
-              <div class="info-box-title">Supplier Details</div>
-              <div class="info-row">
-                <span class="info-label">Supplier Name:</span>
-                <span class="info-value">${partyName || 'N/A'}</span>
-              </div>
-              ${partyAddress ? `<div class="info-row">
-                <span class="info-label">Address:</span>
-                <span class="info-value">${partyAddress}</span>
-              </div>` : ''}
-              ${partyPhone ? `<div class="info-row">
-                <span class="info-label">Phone:</span>
-                <span class="info-value">${partyPhone}</span>
-              </div>` : ''}
-              ${partyGSTIN ? `<div class="info-row">
-                <span class="info-label">GSTIN:</span>
-                <span class="info-value">${partyGSTIN}</span>
-              </div>` : ''}
-              ${partyState ? `<div class="info-row">
-                <span class="info-label">State:</span>
-                <span class="info-value">${partyState} (${partyStateCode})</span>
-              </div>` : ''}
-            </div>
-            <div class="info-box">
-              <div class="info-box-title">Invoice Details</div>
-              <div class="info-row">
-                <span class="info-label">Invoice Number:</span>
-                <span class="info-value" style="font-weight:bold;font-size:12px;">${invoiceNo}</span>
-              </div>
-              <div class="info-row">
-                <span class="info-label">Invoice Date:</span>
-                <span class="info-value">${toDisplayDate(invoiceDate)}</span>
-              </div>
-              ${dueDate ? `<div class="info-row">
-                <span class="info-label">Due Date:</span>
-                <span class="info-value">${toDisplayDate(dueDate)}</span>
-              </div>` : ''}
-              ${orderDate ? `<div class="info-row">
-                <span class="info-label">Order Date:</span>
-                <span class="info-value">${toDisplayDate(orderDate)}</span>
-              </div>` : ''}
-              ${lrNo ? `<div class="info-row">
-                <span class="info-label">L.R. Number:</span>
-                <span class="info-value">${lrNo}</span>
-              </div>` : ''}
-              ${lrDate ? `<div class="info-row">
-                <span class="info-label">L.R. Date:</span>
-                <span class="info-value">${toDisplayDate(lrDate)}</span>
-              </div>` : ''}
-              ${cases ? `<div class="info-row">
-                <span class="info-label">Cases:</span>
-                <span class="info-value">${cases}</span>
-              </div>` : ''}
-              ${transport ? `<div class="info-row">
-                <span class="info-label">Transport:</span>
-                <span class="info-value">${transport}</span>
-              </div>` : ''}
-            </div>
-          </div>
-
-          <!-- Items Table -->
-          <table>
-            <thead>
-              <tr>
-                <th style="width:30px;">#</th>
-                <th style="width:45px;">QTY</th>
-                <th style="width:45px;">FREE</th>
-                <th style="width:70px;">MFR</th>
-                <th style="width:40px;">PACK</th>
-                <th style="width:200px;">PRODUCT NAME</th>
-                <th style="width:75px;">BATCH</th>
-                <th style="width:55px;">EXP</th>
-                <th style="width:60px;">HSN</th>
-                <th style="width:65px;">M.R.P</th>
-                <th style="width:65px;">RATE</th>
-                <th style="width:45px;">DIS%</th>
-                <th style="width:50px;">SGST%</th>
-                <th style="width:65px;">SGST</th>
-                <th style="width:50px;">CGST%</th>
-                <th style="width:65px;">CGST</th>
-                <th style="width:80px;">VALUE</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${validItems.map((item, idx) => `
-                <tr>
-                  <td>${idx + 1}</td>
-                  <td style="font-weight:bold;">${item.qty}</td>
-                  <td>${item.free || '-'}</td>
-                  <td class="left" style="font-size:8px;">${item.mfr || '-'}</td>
-                  <td>${item.pack || 1}</td>
-                  <td class="left" style="font-weight:600;font-size:9px;">${item.productName}</td>
-                  <td style="font-family:monospace;font-weight:bold;font-size:8px;">${item.batch}</td>
-                  <td style="font-size:8px;">${item.exp || '-'}</td>
-                  <td>${item.hsn || '-'}</td>
-                  <td class="right" style="font-weight:600;">₹${item.mrp.toFixed(2)}</td>
-                  <td class="right" style="font-weight:bold;">₹${item.rate.toFixed(2)}</td>
-                  <td>${item.dis || 0}%</td>
-                  <td>${item.sgst}%</td>
-                  <td class="right">₹${item.sgstValue.toFixed(2)}</td>
-                  <td>${item.cgst}%</td>
-                  <td class="right">₹${item.cgstValue.toFixed(2)}</td>
-                  <td class="right" style="font-weight:bold;font-size:10px;">₹${item.value.toFixed(2)}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-            <tfoot style="background:#f5f5f5;">
-              <tr style="font-weight:bold;">
-                <td>TOTAL</td>
-                <td>${totals.totalQty}</td>
-                <td>${totals.totalFree}</td>
-                <td colspan="10"></td>
-                <td class="right">₹${totals.sgst.toFixed(2)}</td>
-                <td></td>
-                <td class="right">₹${totals.cgst.toFixed(2)}</td>
-                <td class="right" style="font-size:12px;">₹${totals.total.toFixed(2)}</td>
-              </tr>
-            </tfoot>
-          </table>
-
-          <!-- Totals Grid -->
-          <div class="totals-grid">
-            <div class="gst-breakdown">
-              <div class="gst-breakdown-title">GST Breakdown</div>
-              <table class="gst-table">
-                <thead>
-                  <tr>
-                    <th>GST RATE</th>
-                    <th>TAXABLE AMOUNT</th>
-                    <th>CGST</th>
-                    <th>SGST</th>
-                    <th>TOTAL GST</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${Object.entries(gstBreakdown).map(([rate, data]) => `
-                    <tr>
-                      <td style="font-weight:bold;">${rate}%</td>
-                      <td class="right">₹${data.taxable.toFixed(2)}</td>
-                      <td class="right">₹${data.cgst.toFixed(2)}</td>
-                      <td class="right">₹${data.sgst.toFixed(2)}</td>
-                      <td class="right" style="font-weight:bold;">₹${(data.cgst + data.sgst).toFixed(2)}</td>
-                    </tr>
-                  `).join('')}
-                  ${Object.keys(gstBreakdown).length === 0 ? '<tr><td colspan="5">No GST Data</td></tr>' : ''}
-                </tbody>
-              </table>
-            </div>
-
-            <div class="summary-box">
-              <div class="summary-title">Summary</div>
-              <div class="summary-row">
-                <span>Total Items:</span>
-                <span>${validItems.length}</span>
-              </div>
-              <div class="summary-row">
-                <span>Total Quantity:</span>
-                <span>${totals.totalQty}</span>
-              </div>
-              <div class="summary-row">
-                <span>Free Quantity:</span>
-                <span>${totals.totalFree}</span>
-              </div>
-              <div class="summary-row">
-                <span>Taxable Amount:</span>
-                <span>₹${Object.values(gstBreakdown).reduce((s, d) => s + d.taxable, 0).toFixed(2)}</span>
-              </div>
-              <div class="summary-row">
-                <span>Total CGST:</span>
-                <span>₹${totals.cgst.toFixed(2)}</span>
-              </div>
-              <div class="summary-row">
-                <span>Total SGST:</span>
-                <span>₹${totals.sgst.toFixed(2)}</span>
-              </div>
-              <div class="summary-row">
-                <span>Total GST:</span>
-                <span>₹${totals.totalGST.toFixed(2)}</span>
-              </div>
-              <div class="summary-row grand">
-                <span>GRAND TOTAL:</span>
-                <span>₹${Math.round(totals.total).toFixed(2)}</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- Profit Analysis Section -->
-          <div class="profit-section">
-            <div class="profit-title">Profit Analysis</div>
-            <div class="profit-row">
-              <span>Total MRP Value (if sold at MRP):</span>
-              <span>₹${totals.totalMRPValue.toFixed(2)}</span>
-            </div>
-            <div class="profit-row">
-              <span>Total Purchase Cost:</span>
-              <span>₹${totals.total.toFixed(2)}</span>
-            </div>
-            <div class="profit-row" style="font-weight:bold;font-size:13px;border-top:2px solid #000;padding-top:12px;margin-top:8px;">
-              <span>Potential Profit (if sold at MRP):</span>
-              <span>₹${totals.potentialProfit.toFixed(2)}</span>
-            </div>
-            <div class="profit-row" style="font-size:12px;">
-              <span>Profit Margin:</span>
-              <span>${totals.totalMRPValue > 0 ? ((totals.potentialProfit / totals.totalMRPValue) * 100).toFixed(2) : 0}%</span>
-            </div>
-          </div>
-
-          <!-- Footer -->
-          <div class="footer">
-            <p style="font-weight:bold;margin-bottom:8px;">Bank Details: Bank of Baroda | Account No: 33030400000044 | Branch: Haripad | IFSC: BARB0HARIPA</p>
-            <p>This is a computer-generated purchase invoice and does not require a signature.</p>
-            <p style="margin-top:8px;font-style:italic;">Generated on: ${new Date().toLocaleString('en-IN')}</p>
-          </div>
-
-          <!-- Signature Section -->
-          <div class="signature-section">
-            <div class="signature-box">
-              Prepared By
-            </div>
-            <div class="signature-box">
-              Authorized Signatory
-            </div>
-          </div>
-        </div>
-      </body>
-      </html>
-    `;
-  };
-
-  // Show Bill Preview
-  const showBillPreviewModal = () => {
-    const html = generateBillPreviewHTML();
-    setBillPreviewHTML(html);
-    setShowBillPreview(true);
-  };
-
-  // Print Bill
-  // ✅ IMPROVED: Print Bill WITHOUT Pop-up (Using Hidden Iframe)
-  const printBill = () => {
-    const html = billPreviewHTML || generateBillPreviewHTML();
-    
-    // Create a hidden iframe for printing
-    const iframe = document.createElement('iframe');
-    iframe.style.position = 'fixed';
-    iframe.style.top = '-10000px';
-    iframe.style.left = '-10000px';
-    iframe.style.width = '297mm'; // A4 landscape width
-    iframe.style.height = '210mm'; // A4 landscape height
-    iframe.style.border = 'none';
-    
-    // Append to body
-    document.body.appendChild(iframe);
-    
-    // Get iframe document
-    const iframeDoc = iframe.contentWindow?.document;
-    if (!iframeDoc) {
-      showToast('❌ Print failed. Please try again.', 'error');
-      document.body.removeChild(iframe);
-      return;
-    }
-    
-    // Write HTML to iframe
-    iframeDoc.open();
-    iframeDoc.write(html);
-    iframeDoc.close();
-    
-    // Wait for content to load, then trigger print
-    setTimeout(() => {
-      try {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
-        
-        // Remove iframe after print dialog closes (cleanup after 1 second)
-        setTimeout(() => {
-          if (document.body.contains(iframe)) {
-            document.body.removeChild(iframe);
-          }
-        }, 1000);
-      } catch (error) {
-        console.error('Print error:', error);
-        showToast('❌ Print failed', 'error');
-        document.body.removeChild(iframe);
-      }
-    }, 500);
-  };
-
-  // ✅ IMPROVED: Save to PDF (Same as Print - Browser has built-in "Save as PDF")
-  const saveToPDF = () => {
-    printBill();
-    showToast('💡 Tip: Select "Save as PDF" in the print dialog', 'success');
-  };
-
-  
-  // ============ CONTINUATION FROM PART 1 ============
-
-  // COMPLETE INVENTORY MAPPING - Save Purchase Invoice
+  /********************** SAVE PURCHASE **********************/
+  // In PurchaseInvoice.tsx - Update the savePurchase function:
   const savePurchase = async () => {
     if (!invoiceNo.trim()) {
-      showToast('Invoice number is required', 'error');
+      showToast(['❌ Invoice number is required'], 'error');
       return;
     }
-
-    const validItems = items.filter(item => item.productName.trim() && item.qty > 0);
+  
+    const validItems = items.filter(item => item.itemName.trim() && item.qty > 0);
     if (validItems.length === 0) {
-      showToast('Add at least one product with quantity', 'error');
+      showToast(['❌ Add at least one product with quantity'], 'error');
       return;
     }
-
+  
+    const messages: string[] = [];
+  
     try {
-      // Prepare purchase record
-      const record: Omit<PurchaseInvoiceRecord, 'id'> = {
+      // ✅ Save to Purchase DB via IPC (SQLite backend)
+      if (!window.purchase?.create) {
+        showToast(['❌ Purchase API not available'], 'error');
+        return;
+      }
+  
+      const record = {
         invoiceNo,
         header: {
           invoiceDate,
@@ -897,776 +412,917 @@ export default function PurchaseInvoice() {
           transport: transport || '',
         },
         party: {
-          name: partyName || 'N/A',
-          address: partyAddress || '',
-          phone: partyPhone || '',
-          gstin: partyGSTIN || '',
-          state: partyState || 'Kerala',
-          stateCode: partyStateCode || '32',
+          name: supplierName || 'N/A',
+          address: supplierAddress || '',
+          phone: supplierPhone || '',
+          gstin: supplierGSTIN || '',
+          state: supplierState || 'Kerala',
+          stateCode: supplierStateCode || '32',
         },
-        items: validItems,
+        items: validItems.map(item => ({
+          id: item.id,
+          slNo: item.slNo,
+          qty: item.qty,
+          free: item.free,
+          mfr: item.mfr,
+          pack: item.pack,
+          productName: item.itemName,
+          batch: item.batch,
+          exp: item.expiry,
+          hsn: item.hsn,
+          mrp: item.mrp,
+          rate: item.rate,
+          dis: item.dis,
+          sgst: item.sgst,
+          sgstValue: item.sgstAmt,
+          cgst: item.cgst,
+          cgstValue: item.cgstAmt,
+          value: item.amount,
+        })),
         totals: {
           totalQty: totals.totalQty,
           totalFree: totals.totalFree,
-          scheme: totals.scheme,
-          discount: totals.discount,
+          scheme: 0,
+          discount: 0,
           sgst: totals.sgst,
           cgst: totals.cgst,
           totalGST: totals.totalGST,
-          total: totals.total,
+          total: totals.grandTotal,
         },
         createdAt: new Date().toISOString(),
       };
-
-      // Save to purchase DB
-      await savePurchaseInvoice(record);
-
-      // COMPLETE INVENTORY MAPPING - Update inventory for each item
+  
+      // ✅ Save via IPC to SQLite
+      await window.purchase.create(record);
+      messages.push('✅ Purchase DB: Successfully saved to SQLite');
+  
+      // Update Inventory (existing code is correct)
       if (window.inventory) {
         for (const item of validItems) {
-          // Generate item code if not existing
-          const itemCode = item.productName
-            .toUpperCase()
-            .replace(/[^A-Z0-9]/g, '_')
-            .substring(0, 20) + '_' + Math.random().toString(36).substr(2, 6).toUpperCase();
-
-          // Check if product with same name and batch exists
-          const existingProduct = allProducts.find(
-            p =>
-              p.itemName.toLowerCase().trim() === item.productName.toLowerCase().trim() &&
-              p.batch.toLowerCase().trim() === item.batch.toLowerCase().trim()
+          const products = await window.inventory.search(item.itemCode);
+          const existingProduct = products.find(
+            p => p.itemCode === item.itemCode && p.batch === item.batch
           );
-
+  
           if (existingProduct) {
-            // Product exists - INCREMENT stock quantity
-            console.log(`Updating existing product: ${existingProduct.itemName} - Batch: ${existingProduct.batch}`);
-            
-            if (window.inventory.incrementStockByCodeBatch) {
-              await window.inventory.incrementStockByCodeBatch(
-                existingProduct.itemCode,
-                existingProduct.batch,
-                item.qty + item.free
-              );
-              console.log(`✅ Stock incremented by ${item.qty + item.free} units`);
-            }
-
-            // Also update OTHER fields (MRP, purchase price, expiry, etc.)
-            if (window.inventory.addOrUpdate) {
-              await window.inventory.addOrUpdate({
-                itemCode: existingProduct.itemCode,
-                itemName: item.productName,
-                batch: item.batch,
-                expiryDate: item.exp || existingProduct.expiryDate,
-                mrp: item.mrp || existingProduct.mrp,
-                purchasePrice: item.rate,
-                stockQuantity: existingProduct.stockQuantity + item.qty + item.free,
-                cgstRate: item.cgst,
-                sgstRate: item.sgst,
-                hsnCode: item.hsn || existingProduct.hsnCode,
-                manufacturer: item.mfr || existingProduct.manufacturer,
-                packSize: item.pack || existingProduct.packSize,
-                sellingPrice: item.mrp || existingProduct.mrp, // Map to selling price
-                category: existingProduct.category || 'General',
-                reorderLevel: existingProduct.reorderLevel || 10,
-                location: existingProduct.location || 'Store',
-                barcode: existingProduct.barcode || '',
-                description: existingProduct.description || '',
-                supplier: partyName || existingProduct.supplier || '',
-              });
-            }
+            await window.inventory.incrementStockByCodeBatch(item.itemCode, item.batch, item.qty + item.free);
+            await window.inventory.updateProduct(existingProduct.id, {
+              mrp: item.mrp,
+              purchasePrice: item.rate,
+              sellingPriceTab: item.mrp * 0.9,
+              expiryDate: item.expiry,
+              hsnCode: item.hsn,
+              manufacturer: item.mfr,
+              packSize: item.pack,
+              cgstRate: item.cgst,
+              sgstRate: item.sgst,
+            });
           } else {
-            // NEW PRODUCT - ADD to inventory with COMPLETE MAPPING
-            console.log(`Adding new product: ${item.productName} - Batch: ${item.batch}`);
-            
-            if (window.inventory.addOrUpdate) {
-              await window.inventory.addOrUpdate({
-                // CORE FIELDS - MAPPED FROM PURCHASE
-                itemCode: itemCode,
-                itemName: item.productName,
-                batch: item.batch,
-                expiryDate: item.exp || '',
-                mrp: item.mrp,
-                purchasePrice: item.rate,
-                sellingPrice: item.mrp, // Assume selling price = MRP initially
-                stockQuantity: item.qty + item.free,
-                cgstRate: item.cgst,
-                sgstRate: item.sgst,
-                hsnCode: item.hsn || '',
-                manufacturer: item.mfr || '',
-                packSize: item.pack || 1,
-                
-                // ADDITIONAL INVENTORY FIELDS - WITH DEFAULTS
-                category: 'General', // Default category
-                reorderLevel: 10, // Default reorder level
-                location: 'Store', // Default storage location
-                barcode: '', // Can be added later
-                description: item.productName, // Use product name as description
-                supplier: partyName || '', // Map from supplier name
-                
-                // TIMESTAMPS
-                createdAt: new Date().toISOString(),
-                lastUpdated: new Date().toISOString(),
-                
-                // PRICING INFO
-                costPrice: item.rate,
-                profit: item.mrp - item.rate,
-                profitMargin: item.mrp > 0 ? ((item.mrp - item.rate) / item.mrp * 100).toFixed(2) : '0',
-                
-                // INVENTORY TRACKING
-                initialStock: item.qty + item.free,
-                currentStock: item.qty + item.free,
-                soldQuantity: 0,
-                returnedQuantity: 0,
-                
-                // STATUS
-                status: 'Active',
-                isExpired: false,
-                lowStock: (item.qty + item.free) <= 10,
-              });
-              
-              console.log(`✅ New product added with ${item.qty + item.free} units`);
-            }
+            await window.inventory.addProduct({
+              itemCode: item.itemCode,
+              itemName: item.itemName,
+              batch: item.batch,
+              expiryDate: item.expiry,
+              hsnCode: item.hsn,
+              manufacturer: item.mfr,
+              pack: item.pack.toString(),
+              packSize: item.pack,
+              mrp: item.mrp,
+              purchasePrice: item.rate,
+              sellingPriceTab: item.mrp * 0.9,
+              stockQuantity: item.qty + item.free,
+              cgstRate: item.cgst,
+              sgstRate: item.sgst,
+              igstRate: 0,
+              category: 'General',
+              rol: 10,
+              minStockLevel: 10,
+              maxStockLevel: 100,
+              prTaxIncluded: false,
+              slTaxIncluded: false,
+              hasExpiryDate: item.expiry ? true : false,
+              regionalName: '',
+              altUnit: '',
+            });
           }
         }
-        
-        // Reload products after update
-        const updatedProducts = await window.inventory.getAll();
-        const formatted = updatedProducts.map((p: any) => ({
-          itemCode: p.itemCode || '',
-          itemName: p.itemName || '',
-          batch: p.batch || '',
-          expiryDate: p.expiryDate || '',
-          mrp: Number(p.mrp || 0),
-          stockQuantity: Number(p.stockQuantity || 0),
-          cgstRate: Number(p.cgstRate || 0),
-          sgstRate: Number(p.sgstRate || 0),
-          hsnCode: p.hsnCode || '',
-          manufacturer: p.manufacturer || '',
-          packSize: Number(p.packSize || 1),
-          purchasePrice: Number(p.purchasePrice || 0),
-        }));
-        setAllProducts(formatted);
+        messages.push('✅ Inventory DB: Successfully updated');
+        await loadInventoryData();
       }
-
-      showToast('✅ Purchase invoice saved & inventory updated successfully!');
-
-      // Reset form
-      setInvoiceNo('');
-      setPartyName('');
-      setPartyAddress('');
-      setPartyPhone('');
-      setPartyGSTIN('');
-      setDueDate('');
-      setOrderDate('');
-      setLrNo('');
-      setLrDate('');
-      setCases('');
-      setTransport('');
-      setItems([
-        {
-          id: generateId(),
-          slNo: 1,
-          qty: 0,
-          free: 0,
-          mfr: '',
-          pack: 1,
-          productName: '',
-          batch: '',
-          exp: '',
-          hsn: '',
-          mrp: 0,
-          rate: 0,
-          dis: 0,
-          sgst: 0,
-          sgstValue: 0,
-          cgst: 0,
-          cgstValue: 0,
-          value: 0,
-        },
-      ]);
+  
+      // Generate print template
+      const html = buildProfessionalA4PrintHTML(validItems);
+      setPreviewHTML(html);
+      setShowPreview(true);
+  
+      showToast(messages, 'success');
     } catch (error) {
       console.error('Failed to save purchase:', error);
-      showToast('❌ Failed to save purchase invoice', 'error');
+      showToast(['❌ Failed to save purchase invoice'], 'error');
     }
   };
+  
+  /********************** BUILD PROFESSIONAL A4 PRINT TEMPLATE **********************/
+  const buildProfessionalA4PrintHTML = (validItems: PurchaseItem[]) => {
+    const ITEMS_PER_PAGE = 12;
+    const pages: PurchaseItem[][] = [];
+    
+    for (let i = 0; i < validItems.length; i += ITEMS_PER_PAGE) {
+      pages.push(validItems.slice(i, i + ITEMS_PER_PAGE));
+    }
 
-  // Keyboard shortcuts
+    const renderPage = (pageItems: PurchaseItem[], pageNum: number, isLastPage: boolean) => `
+      <div class="page">
+        <!-- HEADER -->
+        <div class="header">
+          <h1>PURCHASE INVOICE</h1>
+          <div class="header-info">
+            <div class="col">
+              <p><strong>Invoice No:</strong> ${invoiceNo}</p>
+              <p><strong>Invoice Date:</strong> ${new Date(invoiceDate).toLocaleDateString('en-IN')}</p>
+              <p><strong>Due Date:</strong> ${dueDate ? new Date(dueDate).toLocaleDateString('en-IN') : '-'}</p>
+            </div>
+            <div class="col">
+              <p><strong>Order Date:</strong> ${orderDate ? new Date(orderDate).toLocaleDateString('en-IN') : '-'}</p>
+              <p><strong>Payment Type:</strong> ${paymentType}</p>
+              <p><strong>Cases:</strong> ${cases || 0}</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- SUPPLIER DETAILS -->
+        <div class="party-details">
+          <h3>SUPPLIER DETAILS</h3>
+          <div class="party-grid">
+            <div><strong>Name:</strong> ${supplierName || 'N/A'}</div>
+            <div><strong>GSTIN:</strong> ${supplierGSTIN || 'N/A'}</div>
+            <div><strong>Address:</strong> ${supplierAddress || 'N/A'}</div>
+            <div><strong>Phone:</strong> ${supplierPhone || 'N/A'}</div>
+            <div><strong>State:</strong> ${supplierState} (${supplierStateCode})</div>
+            <div><strong>DL No:</strong> ${supplierDLNo || 'N/A'}</div>
+          </div>
+        </div>
+
+        ${lrNo || transport ? `
+        <div class="transport-details">
+          <div><strong>LR No:</strong> ${lrNo || '-'}</div>
+          <div><strong>LR Date:</strong> ${lrDate ? new Date(lrDate).toLocaleDateString('en-IN') : '-'}</div>
+          <div><strong>Transport:</strong> ${transport || '-'}</div>
+        </div>
+        ` : ''}
+
+        <!-- ITEMS TABLE -->
+        <table>
+          <thead>
+            <tr>
+              <th style="width:25px;">#</th>
+              <th style="width:250px;">Item Name</th>
+              <th style="width:70px;">Batch</th>
+              <th style="width:55px;">Expiry</th>
+              <th style="width:60px;">HSN</th>
+              <th style="width:40px;">Qty</th>
+              <th style="width:35px;">Free</th>
+              <th style="width:70px;">Rate</th>
+              <th style="width:70px;">MRP</th>
+              <th style="width:45px;">Dis%</th>
+              <th style="width:70px;">Taxable</th>
+              <th style="width:60px;">GST</th>
+              <th style="width:80px;">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pageItems.map(item => {
+              const taxable = (item.qty * item.rate) * (1 - item.dis / 100);
+              const gstAmt = item.cgstAmt + item.sgstAmt;
+              return `
+              <tr>
+                <td class="center">${item.slNo}</td>
+                <td>${item.itemName}</td>
+                <td class="center">${item.batch}</td>
+                <td class="center">${item.expiry}</td>
+                <td class="center">${item.hsn}</td>
+                <td class="center">${item.qty}</td>
+                <td class="center">${item.free}</td>
+                <td class="right">${item.rate.toFixed(2)}</td>
+                <td class="right">${item.mrp.toFixed(2)}</td>
+                <td class="center">${item.dis}%</td>
+                <td class="right">${taxable.toFixed(2)}</td>
+                <td class="right">${gstAmt.toFixed(2)}</td>
+                <td class="right"><strong>${item.amount.toFixed(2)}</strong></td>
+              </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+
+        ${isLastPage ? `
+        <!-- TOTALS (ONLY ON LAST PAGE) -->
+        <div class="totals">
+          <div class="totals-grid">
+            <div class="totals-row">
+              <span>Total Quantity:</span>
+              <strong>${totals.totalQty}</strong>
+            </div>
+            <div class="totals-row">
+              <span>Total Free:</span>
+              <strong>${totals.totalFree}</strong>
+            </div>
+            <div class="totals-row">
+              <span>Taxable Amount:</span>
+              <strong>₹${totals.taxable.toFixed(2)}</strong>
+            </div>
+            <div class="totals-row">
+              <span>CGST:</span>
+              <strong>₹${totals.cgst.toFixed(2)}</strong>
+            </div>
+            <div class="totals-row">
+              <span>SGST:</span>
+              <strong>₹${totals.sgst.toFixed(2)}</strong>
+            </div>
+            <div class="totals-row">
+              <span>Total GST:</span>
+              <strong>₹${totals.totalGST.toFixed(2)}</strong>
+            </div>
+            <div class="totals-row grand">
+              <span>GRAND TOTAL:</span>
+              <strong>₹${totals.grandTotal.toFixed(2)}</strong>
+            </div>
+          </div>
+        </div>
+
+        <!-- FOOTER (ONLY ON LAST PAGE) -->
+        <div class="footer">
+          <div class="footer-left">
+            <p><strong>Terms & Conditions:</strong></p>
+            <p>1. Goods once sold will not be taken back</p>
+            <p>2. Subject to jurisdiction only</p>
+          </div>
+          <div class="footer-right">
+            <p style="margin-top: 30px;"><strong>Authorized Signature</strong></p>
+          </div>
+        </div>
+        ` : ''}
+
+        <div class="page-number">Page ${pageNum} of ${pages.length}</div>
+      </div>
+    `;
+
+    return `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="UTF-8" />
+          <title>Purchase Invoice ${invoiceNo}</title>
+          <style>
+            @page { 
+              size: A4; 
+              margin: 10mm; 
+            }
+            
+            * {
+              margin: 0;
+              padding: 0;
+              box-sizing: border-box;
+            }
+            
+            body { 
+              font-family: 'Arial', sans-serif;
+              font-size: 10px;
+              color: #000;
+              line-height: 1.3;
+            }
+            
+            .page {
+              page-break-after: always;
+              position: relative;
+              height: 277mm;
+              padding: 8mm;
+            }
+            
+            .page:last-child {
+              page-break-after: auto;
+            }
+            
+            .header {
+              text-align: center;
+              border-bottom: 2px solid #000;
+              padding-bottom: 8px;
+              margin-bottom: 10px;
+            }
+            
+            .header h1 {
+              font-size: 18px;
+              font-weight: bold;
+              margin-bottom: 8px;
+            }
+            
+            .header-info {
+              display: flex;
+              justify-content: space-between;
+              text-align: left;
+              font-size: 9px;
+            }
+            
+            .header-info .col {
+              flex: 1;
+            }
+            
+            .header-info p {
+              margin: 2px 0;
+            }
+            
+            .party-details {
+              border: 1px solid #000;
+              padding: 6px;
+              margin-bottom: 8px;
+            }
+            
+            .party-details h3 {
+              font-size: 11px;
+              margin-bottom: 5px;
+              border-bottom: 1px solid #000;
+              padding-bottom: 3px;
+            }
+            
+            .party-grid {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 4px;
+              font-size: 9px;
+            }
+            
+            .transport-details {
+              display: flex;
+              justify-content: space-between;
+              border: 1px solid #000;
+              padding: 4px 6px;
+              margin-bottom: 8px;
+              font-size: 9px;
+            }
+            
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin-bottom: 10px;
+            }
+            
+            th, td {
+              border: 1px solid #000;
+              padding: 4px 3px;
+              font-size: 9px;
+            }
+            
+            th {
+              background: #f0f0f0;
+              font-weight: bold;
+              text-align: center;
+            }
+            
+            td.center {
+              text-align: center;
+            }
+            
+            td.right {
+              text-align: right;
+            }
+            
+            .totals {
+              border: 2px solid #000;
+              padding: 8px;
+              margin-top: 10px;
+            }
+            
+            .totals-grid {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 5px;
+            }
+            
+            .totals-row {
+              display: flex;
+              justify-content: space-between;
+              padding: 3px 0;
+              border-bottom: 1px dotted #ccc;
+            }
+            
+            .totals-row.grand {
+              border-top: 2px solid #000;
+              border-bottom: 2px solid #000;
+              font-size: 12px;
+              padding: 5px 0;
+              margin-top: 5px;
+              grid-column: 1 / -1;
+            }
+            
+            .footer {
+              position: absolute;
+              bottom: 15mm;
+              left: 8mm;
+              right: 8mm;
+              display: flex;
+              justify-content: space-between;
+              border-top: 1px solid #000;
+              padding-top: 8px;
+              font-size: 9px;
+            }
+            
+            .footer-left {
+              flex: 1;
+            }
+            
+            .footer-left p {
+              margin: 2px 0;
+            }
+            
+            .footer-right {
+              text-align: right;
+              flex: 1;
+            }
+            
+            .page-number {
+              position: absolute;
+              bottom: 5mm;
+              right: 8mm;
+              font-size: 8px;
+              color: #666;
+            }
+            
+            @media print {
+              body {
+                print-color-adjust: exact;
+                -webkit-print-color-adjust: exact;
+              }
+            }
+          </style>
+        </head>
+        <body>
+          ${pages.map((pageItems, i) => renderPage(pageItems, i + 1, i === pages.length - 1)).join('')}
+        </body>
+      </html>
+    `;
+  };
+
+  const handlePrint = () => {
+    const iframe = document.getElementById('print-iframe') as HTMLIFrameElement;
+    iframe?.contentWindow?.print();
+  };
+
+  const handleClosePreview = () => {
+    setShowPreview(false);
+    clearAll();
+  };
+
+  // ========== FIXED CLOSE BUTTON HANDLER ==========
+  const handleClose = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClose();
+  };
+
+  /********************** GLOBAL SHORTCUTS **********************/
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         savePurchase();
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
-        e.preventDefault();
-        printBill();
-      }
       if (e.key === 'Escape') {
-        setShowProductSearch(false);
-        setShowBillPreview(false);
+        if (showProductSearch) {
+          setShowProductSearch(false);
+        } else if (showPreview) {
+          handleClosePreview();
+        } else {
+          onClose();
+        }
       }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [items, invoiceNo, partyName]);
+  }, [showProductSearch, showPreview, onClose]);
+
+  // ✅ CONTINUE TO PART 2 FOR COMPLETE UI RENDERING...
+  // ✅ CONTINUATION FROM PART 1 - COMPLETE FULLSCREEN UI WITH ALL FIELDS EDITABLE
 
   return (
-    <div className="w-full h-full flex flex-col bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
-      {/* Toast */}
-      {toast.show && (
-        <div
-          className={`fixed top-6 right-6 z-[200] px-6 py-4 rounded-xl shadow-2xl ${
-            toast.type === 'success'
-              ? 'bg-gradient-to-r from-emerald-500 to-green-600'
-              : 'bg-gradient-to-r from-rose-500 to-red-600'
-          } text-white animate-slideInRight`}
-        >
+    <>
+      <div className="fixed inset-0 bg-white z-50 overflow-hidden flex flex-col">
+        {/* ========== HEADER BAR (WORKING CLOSE BUTTON) ========== */}
+        <div className="bg-gradient-to-r from-indigo-600 to-purple-700 text-white px-3 py-2 flex items-center justify-between shadow-lg">
           <div className="flex items-center space-x-3">
-            <div className="text-2xl">{toast.type === 'success' ? '✅' : '❌'}</div>
-            <div className="font-semibold">{toast.message}</div>
+            <h2 className="text-base font-bold">Purchase Invoice Entry</h2>
+            <p className="text-[9px] text-white/80">F3: Search • Arrows/Tab: Navigate • Enter: Add Row • Ctrl+S: Save • Esc: Close</p>
           </div>
+          <button 
+            onClick={handleClose}
+            type="button"
+            className="px-3 py-1 bg-white/20 rounded text-xs hover:bg-white/30 font-bold transition-colors cursor-pointer"
+          >
+            ✕ Close
+          </button>
         </div>
-      )}
 
-      {/* Header */}
-      <div className="px-6 py-4 bg-gradient-to-r from-slate-800 via-slate-900 to-indigo-900 text-white shadow-2xl">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <div className="bg-white/10 p-3 rounded-xl">
-              <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"
-                />
-              </svg>
+        {/* ========== COMPLETE HEADER SECTION WITH ALL FIELDS ========== */}
+        <div className="px-3 py-2 bg-slate-50 border-b overflow-y-auto" style={{maxHeight: '180px'}}>
+          <h3 className="text-[10px] font-bold text-slate-700 mb-2 border-b pb-1">📋 Invoice & Supplier Details</h3>
+          
+          {/* Row 1: Invoice Details */}
+          <div className="grid grid-cols-6 gap-2 mb-2">
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Invoice No *</label>
+              <input value={invoiceNo} onChange={e => setInvoiceNo(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none font-mono font-bold" placeholder="INV-001" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold">Purchase Invoice Entry</h1>
-              <p className="text-sm text-white/70 mt-0.5">Ultra-widescreen Excel interface with complete inventory mapping</p>
-            </div>
-          </div>
-          <div className="flex items-center space-x-3">
-            <button
-              onClick={showBillPreviewModal}
-              className="px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 rounded-lg text-sm font-bold shadow-lg transition-all"
-            >
-              👁️ Preview Bill
-            </button>
-            <button
-              onClick={printBill}
-              className="px-5 py-2.5 bg-gradient-to-r from-purple-500 to-violet-600 hover:from-purple-600 hover:to-violet-700 rounded-lg text-sm font-bold shadow-lg transition-all"
-            >
-              🖨️ Print
-            </button>
-            <button
-              onClick={saveToPDF}
-              className="px-5 py-2.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 rounded-lg text-sm font-bold shadow-lg transition-all"
-            >
-              📄 Save PDF
-            </button>
-            <button
-              onClick={savePurchase}
-              className="px-6 py-2.5 bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-600 hover:to-green-700 rounded-lg text-sm font-bold shadow-lg transition-all"
-            >
-              💾 Save Purchase
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Header Form */}
-      <div className="px-6 py-5 bg-white border-b shadow-sm">
-        <div className="grid grid-cols-12 gap-5">
-          {/* Company Info */}
-          <div className="col-span-4 space-y-3 border-r-2 border-indigo-100 pr-5">
-            <div className="bg-gradient-to-br from-indigo-50 to-blue-100 p-4 rounded-xl border-2 border-indigo-200">
-              <div className="text-xl font-bold text-indigo-900">PENCOS MEDICALS</div>
-              <div className="text-sm text-slate-600 mt-1">MELEPANDIYIL BUILDING</div>
-              <div className="text-sm text-slate-600">CHENGANNUR, KERALA-690514</div>
-              <div className="text-sm text-slate-600 mt-1">Ph: 9497370571, 9447207537</div>
-              <div className="text-sm font-semibold text-indigo-700 mt-2">GSTIN: 32AAXFM5083E1Z1</div>
-            </div>
-
-            {/* Supplier Details */}
-            <div className="space-y-2">
-              <div className="text-sm font-bold text-slate-700 mb-2 flex items-center space-x-2">
-                <span>📋 SUPPLIER DETAILS</span>
-                <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Optional</span>
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Supplier Name</label>
-                <input
-                  value={partyName}
-                  onChange={e => setPartyName(e.target.value)}
-                  placeholder="Supplier name..."
-                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Address</label>
-                <input
-                  value={partyAddress}
-                  onChange={e => setPartyAddress(e.target.value)}
-                  placeholder="Address..."
-                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-sm font-semibold text-slate-700 mb-1.5">Phone</label>
-                  <input
-                    value={partyPhone}
-                    onChange={e => setPartyPhone(e.target.value)}
-                    placeholder="Phone..."
-                    className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-slate-700 mb-1.5">GSTIN</label>
-                  <input
-                    value={partyGSTIN}
-                    onChange={e => setPartyGSTIN(e.target.value)}
-                    placeholder="GSTIN..."
-                    className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Invoice Details */}
-          <div className="col-span-4 space-y-3 border-r-2 border-indigo-100 pr-5">
-            <div className="text-sm font-bold text-slate-700 mb-3">📄 INVOICE DETAILS</div>
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1.5">
-                Invoice No <span className="text-red-500">*</span>
-              </label>
-              <input
-                value={invoiceNo}
-                onChange={e => setInvoiceNo(e.target.value)}
-                placeholder="Enter invoice number..."
-                className="w-full px-4 py-2.5 border-2 border-indigo-300 rounded-lg text-base font-bold focus:ring-2 focus:ring-indigo-500"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Invoice Date</label>
-                <input
-                  type="date"
-                  value={invoiceDate}
-                  onChange={e => setInvoiceDate(e.target.value)}
-                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Due Date</label>
-                <input
-                  type="date"
-                  value={dueDate}
-                  onChange={e => setDueDate(e.target.value)}
-                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
-                />
-              </div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Invoice Date *</label>
+              <input type="date" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" />
             </div>
             <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1.5">Order Date</label>
-              <input
-                type="date"
-                value={orderDate}
-                onChange={e => setOrderDate(e.target.value)}
-                className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
-              />
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Due Date</label>
+              <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" />
+            </div>
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Order Date</label>
+              <input type="date" value={orderDate} onChange={e => setOrderDate(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" />
+            </div>
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Payment Type</label>
+              <select value={paymentType} onChange={e => setPaymentType(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none font-semibold">
+                <option>Cash</option>
+                <option>Credit</option>
+                <option>Card</option>
+                <option>UPI</option>
+                <option>Bank Transfer</option>
+                <option>Cheque</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Cases</label>
+              <input type="number" value={cases} onChange={e => setCases(e.target.value ? Number(e.target.value) : '')} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" min="0" placeholder="0" />
             </div>
           </div>
 
-          {/* Transport Details */}
-          <div className="col-span-4 space-y-3">
-            <div className="text-sm font-bold text-slate-700 mb-3">🚚 TRANSPORT DETAILS</div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1.5">L.R. No</label>
-                <input
-                  value={lrNo}
-                  onChange={e => setLrNo(e.target.value)}
-                  placeholder="LR number..."
-                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1.5">L.R. Date</label>
-                <input
-                  type="date"
-                  value={lrDate}
-                  onChange={e => setLrDate(e.target.value)}
-                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
-                />
+          {/* Row 2: Supplier Details */}
+          <div className="grid grid-cols-6 gap-2 mb-2">
+            <div className="col-span-2">
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Supplier Name *</label>
+              <div className="flex space-x-1">
+                <select value={supplierName} onChange={e => setSupplierName(e.target.value)} className="flex-1 px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none">
+                  <option value="">Select Supplier</option>
+                  {suppliers.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <input type="text" value={supplierName} onChange={e => setSupplierName(e.target.value)} className="flex-1 px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" placeholder="Or type new" />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Cases</label>
-                <input
-                  type="number"
-                  value={cases}
-                  onChange={e => setCases(e.target.value === '' ? '' : Number(e.target.value))}
-                  placeholder="Number of cases..."
-                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Transport</label>
-                <input
-                  value={transport}
-                  onChange={e => setTransport(e.target.value)}
-                  placeholder="Transport name..."
-                  className="w-full px-4 py-2.5 border-2 border-slate-300 rounded-lg text-sm"
-                />
-              </div>
+            <div className="col-span-2">
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Address</label>
+              <input value={supplierAddress} onChange={e => setSupplierAddress(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" placeholder="Full Address" />
             </div>
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Phone</label>
+              <input value={supplierPhone} onChange={e => setSupplierPhone(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" placeholder="Phone" />
+            </div>
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Email</label>
+              <input type="email" value={supplierEmail} onChange={e => setSupplierEmail(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" placeholder="Email" />
+            </div>
+          </div>
+
+          {/* Row 3: GST, Transport, LR Details */}
+          <div className="grid grid-cols-8 gap-2">
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">GSTIN</label>
+              <input value={supplierGSTIN} onChange={e => setSupplierGSTIN(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none font-mono" placeholder="29AAAAA0000A1Z5" />
+            </div>
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">DL No</label>
+              <input value={supplierDLNo} onChange={e => setSupplierDLNo(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none font-mono" placeholder="DL-12345" />
+            </div>
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">State</label>
+              <input value={supplierState} onChange={e => setSupplierState(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" placeholder="Kerala" />
+            </div>
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">State Code</label>
+              <input value={supplierStateCode} onChange={e => setSupplierStateCode(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none font-mono" placeholder="32" />
+            </div>
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">LR No</label>
+              <input value={lrNo} onChange={e => setLrNo(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" placeholder="LR12345" />
+            </div>
+            <div>
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">LR Date</label>
+              <input type="date" value={lrDate} onChange={e => setLrDate(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" />
+            </div>
+            <div className="col-span-2">
+              <label className="block text-[9px] font-bold text-slate-700 mb-0.5">Transport Details</label>
+              <input value={transport} onChange={e => setTransport(e.target.value)} className="w-full px-2 py-1 border-2 rounded text-[10px] focus:border-blue-500 focus:outline-none" placeholder="Transport Company Name" />
+            </div>
+          </div>
+
+          {/* Action Buttons Row */}
+          <div className="flex items-center justify-between mt-2 pt-2 border-t">
+            <div className="flex items-center space-x-2">
+              <button onClick={addRow} className="px-3 py-1 bg-blue-500 text-white rounded text-[10px] hover:bg-blue-600 font-bold">+ Add Row</button>
+              <button onClick={clearAll} className="px-3 py-1 bg-red-500 text-white rounded text-[10px] hover:bg-red-600 font-bold">🗑️ Clear All</button>
+            </div>
+            <button onClick={savePurchase} className="px-5 py-1.5 bg-gradient-to-r from-emerald-500 to-green-600 text-white rounded text-[10px] hover:from-emerald-600 hover:to-green-700 font-bold shadow-lg">💾 Save Invoice (Ctrl+S)</button>
           </div>
         </div>
-      </div>
 
-      {/* ULTRA-WIDESCREEN EXCEL TABLE - 2600px+ WIDTH */}
-      <div className="flex-1 overflow-auto px-6 py-4">
-        <div className="bg-white rounded-xl shadow-2xl overflow-hidden border-2 border-slate-200">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm border-collapse" style={{ minWidth: '2600px' }}>
-              <thead className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white sticky top-0 z-10">
-                <tr>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '60px'}}>#</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>QTY</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>FREE</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '150px'}}>MFR</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>PACK</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-left font-bold" style={{width: '350px'}}>PRODUCT NAME</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '140px'}}>BATCH</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '120px'}}>EXP</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '120px'}}>HSN</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-right font-bold" style={{width: '140px'}}>M.R.P</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-right font-bold" style={{width: '140px'}}>RATE</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>DIS%</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>SGST%</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-right font-bold" style={{width: '140px'}}>SGST</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '100px'}}>CGST%</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-right font-bold" style={{width: '140px'}}>CGST</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-right font-bold" style={{width: '160px'}}>VALUE</th>
-                  <th className="border border-indigo-500 px-4 py-4 text-center font-bold" style={{width: '120px'}}>ACTION</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((item, idx) => (
-                  <tr
-                    key={item.id}
-                    className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'} hover:bg-indigo-50 transition-colors`}
-                  >
-                    <td className="border border-slate-300 px-4 py-3 text-center font-bold text-slate-700 text-lg">
-                      {item.slNo}
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        type="number"
-                        value={item.qty || ''}
-                        onChange={e => updateItem(item.id, 'qty', Number(e.target.value))}
-                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-lg font-bold focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                        placeholder="0"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        type="number"
-                        value={item.free || ''}
-                        onChange={e => updateItem(item.id, 'free', Number(e.target.value))}
-                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-base focus:ring-2 focus:ring-indigo-500"
-                        placeholder="0"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        value={item.mfr}
-                        onChange={e => updateItem(item.id, 'mfr', e.target.value)}
-                        className="w-full px-4 py-3 border-2 border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
-                        placeholder="Manufacturer"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        type="number"
-                        value={item.pack || ''}
-                        onChange={e => updateItem(item.id, 'pack', Number(e.target.value))}
-                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-base focus:ring-2 focus:ring-indigo-500"
-                        placeholder="1"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <div className="flex items-center space-x-2">
-                        <input
-                          value={item.productName}
-                          onChange={e => updateItem(item.id, 'productName', e.target.value)}
-                          className="flex-1 px-4 py-3 border-2 border-slate-300 rounded-lg text-sm font-semibold focus:ring-2 focus:ring-indigo-500"
-                          placeholder="Product name..."
-                        />
-                        <button
-                          onClick={() => openProductSearch(item.id)}
-                          className="px-4 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm font-bold"
-                          title="Search Product"
-                        >
-                          🔍
-                        </button>
-                      </div>
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        value={item.batch}
-                        onChange={e => updateItem(item.id, 'batch', e.target.value)}
-                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg font-mono text-sm font-bold focus:ring-2 focus:ring-indigo-500"
-                        placeholder="Batch"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        value={item.exp}
-                        onChange={e => updateItem(item.id, 'exp', e.target.value)}
-                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
-                        placeholder="MM/YY"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        value={item.hsn}
-                        onChange={e => updateItem(item.id, 'hsn', e.target.value)}
-                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
-                        placeholder="HSN"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={item.mrp || ''}
-                        onChange={e => updateItem(item.id, 'mrp', Number(e.target.value))}
-                        className="w-full px-4 py-3 text-right border-2 border-slate-300 rounded-lg text-lg font-bold focus:ring-2 focus:ring-indigo-500"
-                        placeholder="0.00"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={item.rate || ''}
-                        onChange={e => updateItem(item.id, 'rate', Number(e.target.value))}
-                        className="w-full px-4 py-3 text-right border-2 border-indigo-300 rounded-lg text-lg font-bold text-indigo-700 focus:ring-2 focus:ring-indigo-500"
-                        placeholder="0.00"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={item.dis || ''}
-                        onChange={e => updateItem(item.id, 'dis', Number(e.target.value))}
-                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-base focus:ring-2 focus:ring-amber-500"
-                        placeholder="0"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={item.sgst || ''}
-                        onChange={e => updateItem(item.id, 'sgst', Number(e.target.value))}
-                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-base focus:ring-2 focus:ring-indigo-500"
-                        placeholder="0"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-4 py-3 text-right font-bold text-amber-700 text-lg">
-                      ₹{item.sgstValue.toFixed(2)}
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={item.cgst || ''}
-                        onChange={e => updateItem(item.id, 'cgst', Number(e.target.value))}
-                        className="w-full px-4 py-3 text-center border-2 border-slate-300 rounded-lg text-base focus:ring-2 focus:ring-indigo-500"
-                        placeholder="0"
-                      />
-                    </td>
-                    <td className="border border-slate-300 px-4 py-3 text-right font-bold text-amber-700 text-lg">
-                      ₹{item.cgstValue.toFixed(2)}
-                    </td>
-                    <td className="border border-slate-300 px-4 py-3 text-right font-bold text-indigo-700 text-xl">
-                      ₹{item.value.toFixed(2)}
-                    </td>
-                    <td className="border border-slate-300 px-2 py-2 text-center">
-                      <button
-                        onClick={() => deleteRow(item.id)}
-                        className="px-4 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-sm font-bold"
-                        title="Delete Row"
-                      >
-                        🗑️ Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot className="bg-gradient-to-r from-slate-100 to-slate-200 sticky bottom-0">
-                <tr className="font-bold">
-                  <td className="border border-slate-400 px-4 py-4 text-center" colSpan={1}>
-                    <button
-                      onClick={addRow}
-                      className="px-6 py-3 bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-600 hover:to-green-700 text-white rounded-lg text-base font-bold shadow-lg"
-                    >
-                      ➕ Add Row
-                    </button>
+        {/* ========== FULLSCREEN EXCEL TABLE (ALL FIELDS EDITABLE) ========== */}
+        <div className="flex-1 overflow-auto">
+          <table className="w-full border-collapse text-[10px]">
+            <thead className="bg-slate-700 text-white sticky top-0 z-10">
+              <tr>
+                <th className="px-1 py-1.5 border text-center" style={{width:'30px'}}>#</th>
+                <th className="px-1 py-1.5 border text-left" style={{width:'100px'}}>Code</th>
+                <th className="px-1 py-1.5 border text-left" style={{minWidth:'200px'}}>Item Name (F3)</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'90px'}}>Batch</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'70px'}}>Expiry</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'80px'}}>HSN</th>
+                <th className="px-1 py-1.5 border text-left" style={{width:'100px'}}>Manufacturer</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'50px'}}>Pack</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'60px'}}>Qty</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'50px'}}>Free</th>
+                <th className="px-1 py-1.5 border text-right" style={{width:'75px'}}>Rate</th>
+                <th className="px-1 py-1.5 border text-right" style={{width:'75px'}}>MRP</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'55px'}}>Dis%</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'60px'}}>CGST%</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'60px'}}>SGST%</th>
+                <th className="px-1 py-1.5 border text-right" style={{width:'85px'}}>Amount</th>
+                <th className="px-1 py-1.5 border text-center" style={{width:'40px'}}>Del</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item, idx) => (
+                <tr key={item.id} className="border-b hover:bg-blue-50">
+                  <td className="px-1 py-0.5 border text-center text-[9px] font-bold">{item.slNo}</td>
+                  
+                  {/* Item Code - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-itemCode`] = el}
+                      value={item.itemCode}
+                      onChange={e => updateItem(idx, 'itemCode', e.target.value)}
+                      onKeyDown={e => handleKeyDown(e, idx, 0)}
+                      className="w-full px-1 py-0.5 text-[10px] font-mono border-0 outline-none focus:bg-yellow-50"
+                      placeholder="Code"
+                    />
                   </td>
-                  <td className="border border-slate-400 px-4 py-4 text-center text-indigo-700 text-xl">{totals.totalQty}</td>
-                  <td className="border border-slate-400 px-4 py-4 text-center text-purple-700 text-xl">{totals.totalFree}</td>
-                  <td className="border border-slate-400 px-4 py-4" colSpan={10}></td>
-                  <td className="border border-slate-400 px-4 py-4 text-right text-amber-700 text-lg">{fmtINR(totals.sgst)}</td>
-                  <td className="border border-slate-400 px-4 py-4"></td>
-                  <td className="border border-slate-400 px-4 py-4 text-right text-amber-700 text-lg">{fmtINR(totals.cgst)}</td>
-                  <td className="border border-slate-400 px-4 py-4 text-right text-indigo-700 text-2xl">
-                    {fmtINR(totals.total)}
+                  
+                  {/* Item Name - EDITABLE + Search Button */}
+                  <td className="px-1 py-0.5 border">
+                    <div className="flex space-x-1">
+                      <input
+                        ref={el => inputRefs.current[`${idx}-itemName`] = el}
+                        value={item.itemName}
+                        onChange={e => updateItem(idx, 'itemName', e.target.value)}
+                        onKeyDown={e => handleKeyDown(e, idx, 1)}
+                        className="flex-1 px-1 py-0.5 text-[10px] border-0 outline-none focus:bg-yellow-50"
+                        placeholder="Type name or press F3"
+                      />
+                      <button onClick={() => openProductSearch(idx)} className="px-1 py-0.5 bg-blue-500 text-white rounded text-[9px] hover:bg-blue-600 flex-shrink-0" title="Search (F3)">🔍</button>
+                    </div>
                   </td>
-                  <td className="border border-slate-400 px-4 py-4"></td>
+                  
+                  {/* Batch - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-batch`] = el}
+                      value={item.batch}
+                      onChange={e => updateItem(idx, 'batch', e.target.value)}
+                      onKeyDown={e => handleKeyDown(e, idx, 2)}
+                      className="w-full px-1 py-0.5 text-[10px] font-mono text-center border-0 outline-none focus:bg-yellow-50"
+                      placeholder="Batch"
+                    />
+                  </td>
+                  
+                  {/* Expiry - EDITABLE with auto-format */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-expiry`] = el}
+                      value={item.expiry}
+                      onChange={e => updateItem(idx, 'expiry', e.target.value)}
+                      onKeyDown={e => handleKeyDown(e, idx, 3)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50 text-purple-700 font-bold"
+                      placeholder="MM/YY"
+                      maxLength={5}
+                    />
+                  </td>
+                  
+                  {/* HSN - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-hsn`] = el}
+                      value={item.hsn}
+                      onChange={e => updateItem(idx, 'hsn', e.target.value)}
+                      onKeyDown={e => handleKeyDown(e, idx, 4)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                      placeholder="HSN"
+                    />
+                  </td>
+                  
+                  {/* Manufacturer - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-mfr`] = el}
+                      value={item.mfr}
+                      onChange={e => updateItem(idx, 'mfr', e.target.value)}
+                      onKeyDown={e => handleKeyDown(e, idx, 5)}
+                      className="w-full px-1 py-0.5 text-[10px] border-0 outline-none focus:bg-yellow-50"
+                      placeholder="MFR"
+                    />
+                  </td>
+                  
+                  {/* Pack - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-pack`] = el}
+                      type="number"
+                      min={1}
+                      value={item.pack || ''}
+                      onChange={e => updateItem(idx, 'pack', Number(e.target.value) || 1)}
+                      onKeyDown={e => handleKeyDown(e, idx, 6)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                      placeholder="1"
+                    />
+                  </td>
+                  
+                  {/* Qty - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-qty`] = el}
+                      type="number"
+                      min={0}
+                      value={item.qty || ''}
+                      onChange={e => updateItem(idx, 'qty', Number(e.target.value) || 0)}
+                      onKeyDown={e => handleKeyDown(e, idx, 7)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50 font-bold"
+                      placeholder="0"
+                    />
+                  </td>
+                  
+                  {/* Free - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-free`] = el}
+                      type="number"
+                      min={0}
+                      value={item.free || ''}
+                      onChange={e => updateItem(idx, 'free', Number(e.target.value) || 0)}
+                      onKeyDown={e => handleKeyDown(e, idx, 8)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                      placeholder="0"
+                    />
+                  </td>
+                  
+                  {/* Rate - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-rate`] = el}
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      value={item.rate || ''}
+                      onChange={e => updateItem(idx, 'rate', Number(e.target.value) || 0)}
+                      onKeyDown={e => handleKeyDown(e, idx, 9)}
+                      className="w-full px-1 py-0.5 text-[10px] text-right border-0 outline-none focus:bg-yellow-50 font-bold text-green-700"
+                      placeholder="0.00"
+                    />
+                  </td>
+                  
+                  {/* MRP - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-mrp`] = el}
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      value={item.mrp || ''}
+                      onChange={e => updateItem(idx, 'mrp', Number(e.target.value) || 0)}
+                      onKeyDown={e => handleKeyDown(e, idx, 10)}
+                      className="w-full px-1 py-0.5 text-[10px] text-right border-0 outline-none focus:bg-yellow-50"
+                      placeholder="0.00"
+                    />
+                  </td>
+                  
+                  {/* Discount - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-dis`] = el}
+                      type="number"
+                      step="0.1"
+                      min={0}
+                      max={100}
+                      value={item.dis || ''}
+                      onChange={e => updateItem(idx, 'dis', Number(e.target.value) || 0)}
+                      onKeyDown={e => handleKeyDown(e, idx, 11)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                      placeholder="0"
+                    />
+                  </td>
+                  
+                  {/* CGST - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-cgst`] = el}
+                      type="number"
+                      step="0.1"
+                      min={0}
+                      value={item.cgst || ''}
+                      onChange={e => updateItem(idx, 'cgst', Number(e.target.value) || 0)}
+                      onKeyDown={e => handleKeyDown(e, idx, 12)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                      placeholder="0"
+                    />
+                  </td>
+                  
+                  {/* SGST - EDITABLE */}
+                  <td className="px-1 py-0.5 border">
+                    <input
+                      ref={el => inputRefs.current[`${idx}-sgst`] = el}
+                      type="number"
+                      step="0.1"
+                      min={0}
+                      value={item.sgst || ''}
+                      onChange={e => updateItem(idx, 'sgst', Number(e.target.value) || 0)}
+                      onKeyDown={e => handleKeyDown(e, idx, 13)}
+                      className="w-full px-1 py-0.5 text-[10px] text-center border-0 outline-none focus:bg-yellow-50"
+                      placeholder="0"
+                    />
+                  </td>
+                  
+                  {/* Amount - Calculated */}
+                  <td className="px-1 py-0.5 border text-right text-[10px] font-bold text-blue-700">{item.amount.toFixed(2)}</td>
+                  
+                  {/* Delete Button */}
+                  <td className="px-1 py-0.5 border text-center">
+                    {items.length > 1 && (
+                      <button onClick={() => deleteRow(idx)} className="px-1 py-0.5 text-red-600 hover:bg-red-50 rounded text-[9px]" title="Delete Row">✕</button>
+                    )}
+                  </td>
                 </tr>
-              </tfoot>
-            </table>
+              ))}
+            </tbody>
+            <tfoot className="bg-slate-100 font-bold sticky bottom-0">
+              <tr>
+                <td colSpan={8} className="px-2 py-1.5 border text-right text-[10px]">TOTAL</td>
+                <td className="px-2 py-1.5 border text-center text-[10px] text-blue-700">{totals.totalQty}</td>
+                <td className="px-2 py-1.5 border text-center text-[10px] text-purple-700">{totals.totalFree}</td>
+                <td colSpan={5} className="px-2 py-1.5 border"></td>
+                <td className="px-2 py-1.5 border text-right text-[10px] text-blue-700">{totals.grandTotal.toFixed(2)}</td>
+                <td className="border"></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        {/* ========== FOOTER SUMMARY ========== */}
+        <div className="px-3 py-1.5 bg-slate-50 border-t flex items-center justify-between">
+          <div className="flex items-center space-x-6 text-[10px]">
+            <div><span className="text-slate-600">Taxable:</span> <span className="font-bold">₹{totals.taxable.toFixed(2)}</span></div>
+            <div><span className="text-slate-600">CGST:</span> <span className="font-bold text-green-700">₹{totals.cgst.toFixed(2)}</span></div>
+            <div><span className="text-slate-600">SGST:</span> <span className="font-bold text-green-700">₹{totals.sgst.toFixed(2)}</span></div>
+            <div><span className="text-slate-600">Total GST:</span> <span className="font-bold text-orange-700">₹{totals.totalGST.toFixed(2)}</span></div>
+          </div>
+          <div className="text-right">
+            <div className="text-[9px] text-slate-500">GRAND TOTAL</div>
+            <div className="text-xl font-bold text-blue-700">₹{totals.grandTotal.toFixed(2)}</div>
           </div>
         </div>
       </div>
 
-      {/* GST Summary Footer */}
-      <div className="px-6 py-4 bg-white border-t shadow-lg">
-        <div className="grid grid-cols-12 gap-4">
-          <div className="col-span-8 border-2 border-indigo-200 rounded-xl p-4 bg-gradient-to-br from-indigo-50 to-blue-50">
-            <div className="text-base font-bold text-indigo-900 mb-3">GST BREAKDOWN</div>
-            <table className="w-full text-sm">
-              <thead className="bg-indigo-100">
-                <tr>
-                  <th className="border border-indigo-300 px-4 py-3 text-left font-bold">CLASS</th>
-                  <th className="border border-indigo-300 px-4 py-3 text-right font-bold">TAXABLE</th>
-                  <th className="border border-indigo-300 px-4 py-3 text-right font-bold">SGST</th>
-                  <th className="border border-indigo-300 px-4 py-3 text-right font-bold">CGST</th>
-                  <th className="border border-indigo-300 px-4 py-3 text-right font-bold">TOTAL GST</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(gstBreakdown).map(([rate, data]) => (
-                  <tr key={rate} className="hover:bg-indigo-50">
-                    <td className="border border-indigo-200 px-4 py-3 font-bold text-base">GST {rate}%</td>
-                    <td className="border border-indigo-200 px-4 py-3 text-right text-base">{fmtINR(data.taxable)}</td>
-                    <td className="border border-indigo-200 px-4 py-3 text-right text-amber-600 font-semibold">{fmtINR(data.sgst)}</td>
-                    <td className="border border-indigo-200 px-4 py-3 text-right text-amber-600 font-semibold">{fmtINR(data.cgst)}</td>
-                    <td className="border border-indigo-200 px-4 py-3 text-right font-bold text-indigo-700 text-base">
-                      {fmtINR(data.cgst + data.sgst)}
-                    </td>
-                  </tr>
-                ))}
-                {Object.keys(gstBreakdown).length === 0 && (
-                  <tr>
-                    <td className="border border-indigo-200 px-4 py-6 text-center text-slate-500" colSpan={5}>
-                      No GST data available
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Summary Cards */}
-          <div className="col-span-4 space-y-3">
-            <div className="bg-gradient-to-br from-emerald-50 to-green-100 p-4 rounded-xl border-2 border-emerald-300">
-              <div className="text-sm font-semibold text-emerald-700 mb-1">GRAND TOTAL</div>
-              <div className="text-4xl font-bold text-emerald-800">{fmtINR(Math.round(totals.total))}</div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-gradient-to-br from-amber-50 to-yellow-100 p-3 rounded-xl border-2 border-amber-300">
-                <div className="text-xs font-semibold text-amber-700 mb-1">SGST</div>
-                <div className="text-lg font-bold text-amber-800">{fmtINR(totals.sgst)}</div>
-              </div>
-              <div className="bg-gradient-to-br from-orange-50 to-red-100 p-3 rounded-xl border-2 border-orange-300">
-                <div className="text-xs font-semibold text-orange-700 mb-1">CGST</div>
-                <div className="text-lg font-bold text-orange-800">{fmtINR(totals.cgst)}</div>
-              </div>
-            </div>
-            <div className="bg-gradient-to-br from-purple-50 to-violet-100 p-3 rounded-xl border-2 border-purple-300">
-              <div className="text-xs font-semibold text-purple-700 mb-1">POTENTIAL PROFIT</div>
-              <div className="text-2xl font-bold text-purple-900">{fmtINR(totals.potentialProfit)}</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* PRODUCT SEARCH MODAL */}
+      {/* ========== PRODUCT SEARCH MODAL ========== */}
       {showProductSearch && (
-        <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-md flex items-center justify-center p-6">
-          <div className="bg-white w-full max-w-5xl rounded-2xl shadow-2xl overflow-hidden">
-            <div className="px-6 py-4 bg-gradient-to-r from-purple-800 to-purple-900 text-white flex items-center justify-between">
-              <div>
-                <h3 className="text-xl font-bold">🔍 Product Search</h3>
-                <p className="text-sm text-white/70 mt-0.5">Search by item code, name, or batch</p>
-              </div>
-              <button
-                onClick={() => setShowProductSearch(false)}
-                className="px-4 py-2 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-semibold"
-              >
-                ✕ Close
-              </button>
+        <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[80vh] overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-blue-600 to-indigo-700 text-white flex items-center justify-between">
+              <h3 className="text-lg font-bold">🔍 Search Product from Inventory</h3>
+              <button onClick={() => setShowProductSearch(false)} className="px-3 py-1 bg-white/20 rounded hover:bg-white/30 transition-colors font-bold">✕</button>
             </div>
-
             <div className="p-6">
-              <div className="mb-4">
-                <input
-                  value={productQuery}
-                  onChange={e => setProductQuery(e.target.value)}
-                  placeholder="Type to search products..."
-                  className="w-full px-5 py-4 border-2 border-purple-300 rounded-xl text-base focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
-                  autoFocus
-                />
-              </div>
-
-              <div className="max-h-[500px] overflow-auto border-2 border-purple-200 rounded-xl">
-                {filteredProducts.map((product, idx) => (
-                  <div
-                    key={idx}
-                    onClick={() => selectProduct(product)}
-                    className="p-4 border-b border-slate-200 hover:bg-purple-50 cursor-pointer transition-colors"
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="text-base font-bold text-slate-900">{product.itemName}</div>
-                        <div className="text-sm text-slate-600 mt-1">Code: {product.itemCode}</div>
-                        <div className="flex items-center space-x-3 mt-2 text-sm">
-                          <span className="px-3 py-1 bg-purple-100 text-purple-700 rounded-lg font-mono font-bold">
-                            {product.batch}
-                          </span>
-                          <span className="text-slate-500">Exp: {product.expiryDate}</span>
-                          <span className="text-emerald-600 font-semibold">MRP: ₹{product.mrp.toFixed(2)}</span>
-                          <span className="text-indigo-600 font-semibold">HSN: {product.hsnCode}</span>
+              <input type="text" value={productSearchQuery} onChange={e => setProductSearchQuery(e.target.value)} placeholder="Search by name, code, batch, or HSN..." className="w-full px-4 py-3 text-sm border-2 border-blue-300 rounded-lg focus:border-blue-500 focus:outline-none mb-4" autoFocus />
+              <div className="max-h-[400px] overflow-auto">
+                {filteredProducts.length > 0 ? (
+                  <div className="space-y-2">
+                    {filteredProducts.map((p, i) => (
+                      <div key={i} onClick={() => selectProduct(p)} className="p-4 border-2 border-slate-200 rounded-lg hover:border-blue-500 hover:bg-blue-50 cursor-pointer transition-all">
+                        <div className="flex justify-between">
+                          <div className="flex-1">
+                            <div className="font-bold text-slate-800">{p.itemName}</div>
+                            <div className="text-xs text-slate-600 mt-1 font-mono">{p.itemCode} | Batch: <span className="font-bold">{p.batch || 'N/A'}</span> | HSN: <span className="font-bold">{p.hsnCode}</span></div>
+                            <div className="text-xs text-slate-600 mt-1">MFR: {p.manufacturer || 'N/A'} | Exp: {p.expiryDate || 'N/A'}</div>
+                          </div>
+                          <div className="text-right ml-4">
+                            <div className="text-sm">Stock: <span className="font-bold text-blue-700">{p.stockQuantity}</span></div>
+                            <div className="text-sm">MRP: <span className="font-bold">₹{p.mrp.toFixed(2)}</span></div>
+                            <div className="text-xs text-slate-600">GST: {p.cgstRate + p.sgstRate}%</div>
+                          </div>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <div className="text-xs text-slate-500">Stock</div>
-                        <div className="text-2xl font-bold text-indigo-700">{product.stockQuantity}</div>
-                      </div>
-                    </div>
+                    ))}
                   </div>
-                ))}
-                {filteredProducts.length === 0 && productQuery && (
-                  <div className="p-12 text-center text-slate-500">
-                    <div className="text-5xl mb-3">🔍</div>
-                    <div className="text-base font-semibold">No products found</div>
-                  </div>
-                )}
-                {!productQuery && (
-                  <div className="p-12 text-center text-slate-400">
-                    <div className="text-5xl mb-3">📦</div>
-                    <div className="text-base">Start typing to search products</div>
-                  </div>
+                ) : (
+                  <div className="text-center py-12 text-slate-500">{productSearchQuery ? 'No products found' : 'Type to search...'}</div>
                 )}
               </div>
             </div>
@@ -1674,41 +1330,48 @@ export default function PurchaseInvoice() {
         </div>
       )}
 
-      {/* BILL PREVIEW MODAL */}
-      {showBillPreview && billPreviewHTML && (
-        <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
-          <div className="bg-white w-full max-w-[95vw] max-h-[90vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col">
-            <div className="px-6 py-4 bg-gradient-to-r from-slate-800 to-indigo-900 text-white flex items-center justify-between">
-              <h3 className="text-xl font-bold">📄 Purchase Invoice Preview - Plain White Bill with Profit Analysis</h3>
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={printBill}
-                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-sm font-bold"
-                >
-                  🖨️ Print
-                </button>
-                <button
-                  onClick={saveToPDF}
-                  className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 rounded-lg text-sm font-bold"
-                >
-                  📄 Save PDF
-                </button>
-                <button
-                  onClick={() => setShowBillPreview(false)}
-                  className="px-4 py-2 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-semibold"
-                >
-                  ✕ Close
-                </button>
+      {/* ========== PREVIEW MODAL WITH PROFESSIONAL A4 PRINT ========== */}
+      {showPreview && (
+        <div className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-6xl h-[90vh] rounded-lg shadow-2xl flex flex-col">
+            <div className="px-4 py-3 bg-gradient-to-r from-purple-600 to-indigo-700 text-white flex items-center justify-between">
+              <h3 className="font-bold text-lg">📄 Purchase Invoice Preview (A4 Format)</h3>
+              <div className="flex space-x-2">
+                <button onClick={handlePrint} className="px-4 py-2 bg-emerald-500 rounded text-sm hover:bg-emerald-600 font-bold">🖨️ Print</button>
+                <button onClick={handleClosePreview} className="px-3 py-2 bg-white/20 rounded text-sm hover:bg-white/30 font-bold">✕ Close & Clear</button>
               </div>
             </div>
-            <div className="flex-1 overflow-auto p-6 bg-slate-100">
-              <div className="bg-white shadow-xl mx-auto" style={{ width: '297mm', minHeight: '210mm' }}>
-                <div dangerouslySetInnerHTML={{ __html: billPreviewHTML }} />
-              </div>
+            <div className="flex-1 overflow-auto bg-gray-100">
+              <iframe
+                id="print-iframe"
+                srcDoc={previewHTML}
+                className="w-full h-full border-0"
+                title="Invoice Preview"
+              />
             </div>
           </div>
         </div>
       )}
-    </div>
+
+      {/* ========== TOAST NOTIFICATION ========== */}
+      {toast.show && (
+        <div className={`fixed top-4 right-4 z-[200] ${toast.type === 'success' ? 'bg-gradient-to-r from-emerald-500 to-green-600' : 'bg-gradient-to-r from-rose-500 to-red-600'} text-white px-6 py-4 rounded-lg shadow-2xl animate-slideIn max-w-md`}>
+          <div className="space-y-1">
+            {toast.messages.map((msg, i) => (
+              <div key={i} className="text-sm font-semibold">{msg}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ========== CSS ANIMATIONS ========== */}
+      <style>{`
+        @keyframes slideIn {
+          from { transform: translateX(100%); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+        .animate-slideIn { animation: slideIn 0.3s ease-out; }
+      `}</style>
+    </>
   );
 }

@@ -44,7 +44,7 @@ interface CompanyData {
 }
 
 interface InvoicePrintPreviewProps {
-  invoice: Invoice;
+  invoice: Invoice;  
   companyData?: CompanyData | null;
   onClose: () => void;
 }
